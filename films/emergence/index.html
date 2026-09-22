@@ -1,0 +1,2611 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Emergence — many small things learning to listen. An original, procedural risograph film.">
+<title>Emergence · many small things learning to listen</title>
+<style>
+:root{color-scheme:light;--paper:#F2EDE3;--ink:#2E3192}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#e6e0d5;color:var(--ink);font:12px/1.5 ui-monospace,monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px 20px;gap:18px}
+header,#ui{width:720px;max-width:100%}header{display:flex;align-items:baseline;justify-content:space-between}header b{font-weight:500;letter-spacing:.36em;font-size:14px}header span{font-size:10px;letter-spacing:.1em;color:#807b83}
+#stage{position:relative;width:720px;height:720px;box-shadow:0 12px 48px #55462520}canvas{display:block;width:720px;height:720px}#load{position:absolute;inset:0;display:grid;place-items:center;background:var(--paper);letter-spacing:.13em}
+#scrub{position:relative;height:26px;border-top:1px solid #2e31922b;cursor:pointer}#play-head{position:absolute;top:-2px;height:8px;width:3px;background:#FF6C2F}.act{position:absolute;top:6px;font-size:8px;letter-spacing:.03em;color:#827c87;pointer-events:none}
+#bar{display:flex;align-items:center;gap:8px}button{border:1px solid #2e31922b;padding:7px 12px;background:transparent;color:var(--ink);font:inherit;cursor:pointer;border-radius:2px}button:hover{background:#f2ede3}button:focus-visible,#scrub:focus-visible{outline:2px solid #FF6C2F;outline-offset:3px}#t{font-size:10px;color:#797480;padding-left:8px}footer{font-size:9px;letter-spacing:.14em;color:#8c8587}
+#score-row{display:flex;align-items:center;gap:10px;margin-top:12px;color:#797480;font-size:10px}#score-choice{font:inherit;color:var(--ink);background:var(--paper);border:1px solid #2e31922b;padding:6px 8px;max-width:100%}#score-choice:focus-visible{outline:2px solid #FF6C2F;outline-offset:3px}
+@media(max-width:760px),(max-height:800px){body{display:block;padding:0;background:var(--paper)}header,footer{display:none}#stage{margin:0 auto;box-shadow:none}#ui{margin:16px auto;padding:0 14px}}
+@media(max-width:719px){#stage{width:100vw;height:100vw}canvas{width:100vw;height:100vw}.act{font-size:0}.act::after{content:attr(data-short);font-size:8px}#bar{gap:5px}button{font-size:10px;padding:6px 8px;white-space:nowrap}#t{font-size:9px;white-space:nowrap;padding-left:2px}}
+</style>
+<header><b>EMERGENCE</b><span>MANY SMALL THINGS LEARNING TO LISTEN · 28 SECONDS</span></header>
+<div id="stage"><canvas id="c" aria-label="Emergence, a procedural animated film"></canvas><div id="load">warming the plates…</div></div>
+<div id="ui"><div id="scrub" role="slider" tabindex="0" aria-label="Film position" aria-valuemin="0" aria-valuemax="28"><div id="play-head"></div></div><div id="bar"><button id="btn-play">play</button><button id="btn-replay">replay</button><span id="t">0.00 / 28.00</span><span style="flex:1"></span><button id="btn-audio">sound: off</button><button id="btn-rec">record</button></div><div id="score-row"><label for="score-choice">score</label><select id="score-choice"><option value="warm">A · Gravity</option><option value="pulse">B · Orbit</option></select></div></div>
+<footer>A QUESTION, AND WHAT LISTENED</footer>
+<script>
+'use strict';
+
+const CSS  = 720;            // styled size
+const W    = 1080;           // backing store; halftone pitch is defined here
+const DUR  = 28.0;
+const BEAT = 0.5;            // 120 BPM
+
+const PAPER = '#F2EDE3';
+const INK = {
+  blue:   '#0078BF',
+  pink:   '#FF48B0',
+  yellow: '#FFE800',
+  green:  '#00A95C',
+  orange: '#FF6C2F',
+  violet: '#765BA7',
+  indigo: '#2E3192',
+};
+
+/* Screen angles as rational tangents (b/a). A rotated dot grid only repeats
+   seamlessly on a rational tangent, so these are the real angles rather than
+   the nominal 15/45/75 — any other value leaves a visible seam where the
+   pattern tile wraps. A non-reduced pair (3/3, 2/0) keeps the angle but
+   tiles a 3x3 or 2x1 supercell: the dot centres then fall at different
+   sub-pixel phases, so a coverage ramp gets many more threshold levels. The
+   reduced 1/1 tile held two dots in 49 pixels and banded a slow ramp into
+   three plateaus. */
+const SCREEN = {
+  blue:   { a: 4, b: 1 },   // 14.0°
+  pink:   { a: 1, b: 4 },   // 76.0°
+  yellow: { a: 2, b: 0 },   //  0.0°
+  green:  { a: 3, b: 3 },   // 45.0°
+  orange: { a: 2, b: 1 },   // 26.6°
+  violet: { a: 1, b: 2 },   // 63.4°
+  indigo: { a: 3, b: 3 },   // 45.0°
+};
+const PITCH = 4.6;           // device px between dot centres
+
+/* Registration: each plate misses by a fixed amount, in device px. */
+const REG = {
+  blue:   [ 1.5, -1.0], pink:   [-2.5,  2.0], yellow: [ 2.0,  1.5],
+  green:  [-1.5, -1.5], orange: [ 1.0,  2.0], violet: [-2.0, -1.0],
+  indigo: [ 0.0,  0.0],
+};
+
+/* Alternate colourways for the reprise and recollection: a swap remaps which
+   physical plate a logical ink prints on, so a scene replays in different inks
+   without being redrawn. */
+const SWAPS = {
+  dusk:  { blue: 'violet', violet: 'indigo', indigo: 'indigo', orange: 'yellow',
+           yellow: 'orange', green: 'blue', pink: 'violet' },
+  ember: { blue: 'violet', violet: 'blue', indigo: 'indigo', orange: 'blue',
+           yellow: 'yellow', green: 'orange', pink: 'orange' },
+};
+
+const DOT_R = W * 0.011;     // 2.2% of frame width, diameter
+const CX = W / 2, CY = W / 2;
+const CORNER = Math.hypot(CX, CY);
+
+/* ── deterministic randomness ─────────────────────────────────────────────── */
+
+function mulberry32(a) {
+  return function () {
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const rngFor = (key) => mulberry32(hash(key));
+
+/** Smooth periodic wobble in θ, so a ring closes on itself without a seam. */
+function wobbler(key, harmonics = 3) {
+  const r = rngFor(key), h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, r() * 2 - 1, r() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, amp, ph]) => s + amp * Math.sin(k * th + ph), 0) / harmonics;
+}
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, u) => a + (b - a) * u;
+const easeOutCubic = (u) => 1 - Math.pow(1 - u, 3);
+const easeInOutCubic = (u) => u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+const easeOutBack = (u, s = 1.70158) => 1 + (s + 1) * Math.pow(u - 1, 3) + s * Math.pow(u - 1, 2);
+const easeInQuad = (u) => u * u;
+
+function cv(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+/* ── halftone screens ─────────────────────────────────────────────────────────
+   For screen angle tanθ = b/a the dot lattice is generated by the orthogonal
+   vectors P/√(a²+b²)·(a,b) and P/√(a²+b²)·(−b,a). That lattice contains
+   (P√(a²+b²), 0), so a square tile of side S = P√(a²+b²) repeats seamlessly and
+   holds exactly a²+b² dots.
+
+   Screens are anchored to canvas space, never to the object being drawn. A
+   screen that rides along with its subject makes the texture crawl, which is
+   the single most recognisable way this look goes wrong.                     */
+
+const screens = {};
+
+function buildScreen(name) {
+  const { a, b } = SCREEN[name];
+  const n = a * a + b * b;
+  const S = Math.max(2, Math.round(PITCH * Math.sqrt(n)));
+  const P = S / Math.sqrt(n);              // effective pitch after rounding
+  const u = P / Math.sqrt(n);
+  const v1 = [u * a, u * b], v2 = [-u * b, u * a];
+
+  // Lattice points reduced into the tile, plus wrapped neighbours so dots that
+  // straddle an edge are drawn on both sides.
+  const pts = [];
+  for (let m = -n; m <= n; m++) {
+    for (let k = -n; k <= n; k++) {
+      const x = m * v1[0] + k * v2[0], y = m * v1[1] + k * v2[1];
+      const wx = ((x % S) + S) % S, wy = ((y % S) + S) % S;
+      if (!pts.some(p => Math.abs(p[0] - wx) < 0.01 && Math.abs(p[1] - wy) < 0.01)) pts.push([wx, wy]);
+    }
+  }
+  const wrapped = [];
+  for (const [x, y] of pts) for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]) wrapped.push([x + dx, y + dy]);
+
+  // Threshold tile: a pixel takes ink when coverage exceeds π·d²/P², which is
+  // the coverage at which a dot of radius d would reach that pixel.
+  const th = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let d2 = Infinity;
+      for (const [px, py] of wrapped) {
+        const dx = x + 0.5 - px, dy = y + 0.5 - py, q = dx * dx + dy * dy;
+        if (q < d2) d2 = q;
+      }
+      th[y * S + x] = clamp(Math.PI * d2 / (P * P), 0, 1);
+    }
+  }
+  return { S, P, pts, wrapped, th, patterns: new Map() };
+}
+
+function screenOf(name) {
+  return screens[name] || (screens[name] = buildScreen(name));
+}
+
+/** Tiled dot pattern at a quantised coverage, for live elements. */
+function dotPattern(ctx, name, coverage) {
+  const sc = screenOf(name);
+  const q = clamp(Math.round(coverage * 16), 0, 16);
+  if (!sc.patterns.has(q)) {
+    const t = cv(sc.S, sc.S), tx = t.getContext('2d');
+    const c = q / 16;
+    if (c >= 1) { tx.fillStyle = '#000'; tx.fillRect(0, 0, sc.S, sc.S); }
+    else if (c > 0) {
+      const r = sc.P * Math.sqrt(c / Math.PI);
+      tx.fillStyle = '#000';
+      for (const [x, y] of sc.wrapped) { tx.beginPath(); tx.arc(x, y, r, 0, Math.PI * 2); tx.fill(); }
+    }
+    sc.patterns.set(q, t);
+  }
+  const pat = ctx.createPattern(sc.patterns.get(q), 'repeat');
+  pat.setTransform(new DOMMatrix());   // pin to canvas space so it cannot swim
+  return pat;
+}
+
+/** Screen a greyscale coverage canvas into hard dots. Bake-time only. */
+function screenCoverage(covCanvas, name) {
+  const sc = screenOf(name);
+  const w = covCanvas.width, h = covCanvas.height;
+  const src = covCanvas.getContext('2d').getImageData(0, 0, w, h);
+  const s = src.data;
+  for (let y = 0; y < h; y++) {
+    const row = (y % sc.S) * sc.S;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const cover = s[i + 3] / 255;
+      s[i + 3] = cover > sc.th[row + (x % sc.S)] ? 255 : 0;
+    }
+  }
+  const out = cv(w, h);
+  out.getContext('2d').putImageData(src, 0, 0);
+  return out;
+}
+
+/* ── ink passes ───────────────────────────────────────────────────────────────
+   Draw coverage into a scratch layer, screen it, tint it, then multiply it onto
+   the paper at that plate's registration offset. Darks come from stacking
+   plates; there is no black ink anywhere in the film.                         */
+
+const scratch = cv(W, W), sx = scratch.getContext('2d');
+
+/**
+ * opts.coverage — dot-screen density, for tonal areas.
+ * opts.alpha    — plate opacity, for fades.
+ * These are separate because punching a screen through a thin stroke reads as a
+ * broken line, not a lighter one; line work fades on alpha and width instead.
+ */
+function inkPass(ctx, name, opts, drawFn) {
+  const coverage = opts.coverage === undefined ? 1 : opts.coverage;
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+  sx.save();
+  drawFn(sx);
+  sx.restore();
+
+  if (coverage < 1) {                       // punch the dot screen out of the shape
+    sx.save();
+    sx.globalCompositeOperation = 'destination-in';
+    sx.fillStyle = dotPattern(sx, name, coverage);
+    sx.fillRect(0, 0, W, W);
+    sx.restore();
+  }
+  sx.save();                                // tint
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/* ── paper ────────────────────────────────────────────────────────────────────
+   Cloudy mottling rather than fine grain: the reference shows blotches a few
+   hundred px across at low contrast. Baked once, never recomputed, because any
+   per-frame regeneration flickers.                                           */
+
+let paper = null;
+
+function bakePaper() {
+  const c = cv(W, W), x = c.getContext('2d');
+  x.fillStyle = PAPER; x.fillRect(0, 0, W, W);
+
+  const r = rngFor('paper');
+
+  // Mottling is a warm wash with noisy alpha, not a neutral multiply: greyscale
+  // noise multiplied over cream desaturates it and reads as smoke rather than
+  // paper. Keep it subtle at full size and only obvious when zoomed.
+  for (const [res, maxA] of [[30, 0.10], [72, 0.075], [165, 0.05]]) {
+    const n = cv(res, res), nx = n.getContext('2d');
+    const img = nx.createImageData(res, res);
+    for (let i = 0; i < res * res; i++) {
+      img.data[i * 4] = 0xB4; img.data[i * 4 + 1] = 0xA6; img.data[i * 4 + 2] = 0x8C;
+      img.data[i * 4 + 3] = Math.pow(r(), 1.8) * 255 * maxA;
+    }
+    nx.putImageData(img, 0, 0);
+    x.save();
+    x.imageSmoothingEnabled = true;
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(n, 0, 0, W, W);
+    x.restore();
+  }
+
+  x.save();                                  // fibres
+  x.strokeStyle = '#8a7f6a';
+  for (let i = 0; i < 420; i++) {
+    const px = r() * W, py = r() * W, len = 5 + r() * 22, ang = r() * Math.PI;
+    x.globalAlpha = 0.008 + r() * 0.016;
+    x.lineWidth = 0.5 + r() * 0.7;
+    x.beginPath();
+    x.moveTo(px, py);
+    x.quadraticCurveTo(px + Math.cos(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       py + Math.sin(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       px + Math.cos(ang) * len, py + Math.sin(ang) * len);
+    x.stroke();
+  }
+  x.restore();
+
+  x.save();                                  // flecks
+  for (let i = 0; i < 2200; i++) {
+    x.globalAlpha = 0.012 + r() * 0.03;
+    x.fillStyle = r() < 0.55 ? '#7d7362' : '#ffffff';
+    x.beginPath();
+    x.arc(r() * W, r() * W, 0.4 + r() * 1.0, 0, Math.PI * 2);
+    x.fill();
+  }
+  x.restore();
+  return c;
+}
+
+/* ── marks ────────────────────────────────────────────────────────────────── */
+
+/** A ring that is never a true circle: low-frequency wobble on the radius. */
+function ringPath(ctx, cx, cy, r, wob, amp) {
+  ctx.beginPath();
+  ringAt(ctx, cx, cy, r, wob, amp);
+}
+
+/** Ripple: grows past the frame corner in ~0.6s, thinning and fading. */
+function drawRipple(ctx, cue, t) {
+  const u = clamp((t - cue.start) / cue.dur, 0, 1);
+  if (u <= 0 || u >= 1) return;
+  const e = easeOutCubic(u);
+  let cx = CX, cy = CY;
+  if (cue.from) { const p = dotPos(t, cue.from); cx = p[0]; cy = p[1]; }
+  const bold = cue.bold || 1;
+  const r = lerp(DOT_R * 0.9, cue.maxR || CORNER * 1.15, e);
+  const alpha = (u < 0.08 ? u / 0.08 : 1) * (1 - easeInQuad(clamp((u - 0.45) / 0.55, 0, 1)));
+  const width = lerp(4.6 * bold, 1.15 * bold, e);
+  const wob = wobbler(cue.seed);
+
+  inkPass(ctx, cue.ink, { alpha }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineWidth = width;
+    g.lineJoin = 'round';
+    ringPath(g, cx, cy, r, wob, 0.010);
+    g.stroke();
+  });
+  drawTicks(ctx, cue, cx, cy, r, e, alpha);
+}
+
+/** Vibration ticks: 2-3 short parallel arcs flicking just outside the rim. */
+function drawTicks(ctx, cue, cx, cy, r, e, alpha) {
+  const tr = rngFor(cue.seed + ':tick');
+  const spots = [];
+  for (let i = 0, n = 1 + Math.floor(tr() * 2); i < n; i++) spots.push(tr() * Math.PI * 2);
+  inkPass(ctx, cue.ink, { alpha: alpha * 0.8 }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    for (const th of spots) {
+      for (let k = 0; k < 3; k++) {
+        const rr = r * (1.035 + k * 0.028);
+        const span = 0.05 - k * 0.011;
+        g.lineWidth = lerp(2.8, 0.9, e) * (1 - k * 0.18);
+        g.beginPath();
+        g.arc(cx, cy, rr, th - span, th + span);
+        g.stroke();
+      }
+    }
+  });
+}
+
+/** A voice: one ink, with a second plate escaping as a registration crescent. */
+function drawDotAt(ctx, x, y, mainInk, r, coreInk, fringeInk) {
+  // Solid marks can composite as vectors. Keeping a 24 px seed off the full
+  // canvas scratch plates avoids two 1080-square passes on every frame.
+  const fi = fringeInk || 'pink', wob = wobbler('dot:' + mainInk, 2);
+  const shape = (name, radius) => {
+    const p = new Path2D(), [ox, oy] = REG[name];
+    ringAt(p, x + ox, y + oy, Math.max(.001, radius), wob, .035, 48);
+    return p;
+  };
+  const main = shape(mainInk, r), fringe = shape(fi, r), inverse = new Path2D();
+  inverse.rect(x-r-10,y-r-10,r*2+20,r*2+20);inverse.addPath(main);
+  ctx.save();ctx.globalCompositeOperation='multiply';
+  ctx.save();ctx.clip(inverse,'evenodd');ctx.fillStyle=INK[fi];ctx.fill(fringe);ctx.restore();
+  ctx.fillStyle=INK[mainInk];
+  if(coreInk){
+    const core=shape(mainInk,r*.46),rim=new Path2D();rim.addPath(main);rim.addPath(core);
+    ctx.fill(rim,'evenodd');ctx.fillStyle=INK[coreInk];ctx.fill(core);
+  }else ctx.fill(main);
+  ctx.restore();
+}
+
+function drawDot(ctx, t, scale = 1) {
+  drawDotAt(ctx, CX, CY, 'indigo', DOT_R * scale, null, 'blue');
+}
+
+/* ── scene drawing helpers ────────────────────────────────────────────────────
+   Scenes draw coverage in 1080-space and alpha is tone, so 0.4 means a 40%
+   dot screen. Shape helpers carry hand wobble; nothing here is a true circle
+   or a straight line.                                                        */
+
+function makeWob(rng, harmonics = 3) {
+  const h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, rng() * 2 - 1, rng() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, a, p]) => s + a * Math.sin(k * th + p), 0) / harmonics;
+}
+
+const tone = (g, a) => { g.globalAlpha = clamp(a, 0, 1); };
+
+/** Append a wobbly ring to the current path. */
+function ringAt(g, cx, cy, r, wob, amp = 0.02, steps = 0) {
+  const n = steps || clamp(Math.round(r * 0.8), 40, 300);
+  for (let i = 0; i <= n; i++) {
+    const th = i / n * Math.PI * 2;
+    const rr = r * (1 + wob(th) * amp);
+    const x = cx + Math.cos(th) * rr, y = cy + Math.sin(th) * rr;
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.closePath();
+}
+
+function blob(g, cx, cy, r, rng, amp = 0.06) {
+  g.beginPath();
+  ringAt(g, cx, cy, r, makeWob(rng, 3), amp);
+}
+
+/** Hand-drawn polyline: wobbled control points, not a ruled edge. */
+function hand(g, pts, rng, amp = 2.5) {
+  g.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y] = pts[i];
+    const jx = x + (rng() - 0.5) * amp * 2, jy = y + (rng() - 0.5) * amp * 2;
+    i ? g.lineTo(jx, jy) : g.moveTo(jx, jy);
+  }
+}
+
+/** Concentric sound/light/water arcs — the motif that rhymes with the ripples. */
+function arcsFan(g, cx, cy, r0, dr, n, a0, a1, lw, rng) {
+  for (let i = 0; i < n; i++) {
+    g.lineWidth = lw * (1 - i * 0.12);
+    g.beginPath();
+    const r = r0 + i * dr, j = rng ? (rng() - 0.5) * 0.05 : 0;
+    g.arc(cx, cy, r, a0 + j, a1 + j);
+    g.stroke();
+  }
+}
+
+/* ── scene registry ───────────────────────────────────────────────────────── */
+
+const SCENES = {};
+const scene = (id, def) => { SCENES[id] = Object.assign({ id, live: null }, def); };
+
+const baked = new Map();
+
+/**
+ * Bake a scene to one opaque bitmap: every plate screened, tinted, offset and
+ * multiplied onto white, ready to multiply over paper.
+ *
+ * Baked at its display size, never scaled afterwards. Resampling a halftoned
+ * bitmap beats the dot grid against the pixel grid and moirés; real print
+ * screens at final size too.
+ */
+function bakeScene(id, size, swap) {
+  const key = id + '@' + size + (swap ? ':' + swap : '');
+  if (baked.has(key)) return baked.get(key);
+  const sc = SCENES[id];
+  const k = size / W;
+  const out = cv(size, size), o = out.getContext('2d');
+  o.fillStyle = '#fff';
+  o.fillRect(0, 0, size, size);
+
+  const cover = cv(size, size), g = cover.getContext('2d');
+  for (const ink of sc.inks) {
+    const plate = swap ? (SWAPS[swap][ink] || ink) : ink;
+    g.setTransform(k, 0, 0, k, 0, 0);
+    g.clearRect(0, 0, W, W);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.fillStyle = g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.save();
+    sc.plates(g, ink, rngFor(id + ':' + ink), rngFor(id + ':shape'));
+    g.restore();
+    starve(g, rngFor(id + ':' + ink + ':void'));
+
+    const dots = screenCoverage(cover, plate);
+    const tin = cv(size, size), tx = tin.getContext('2d');
+    tx.drawImage(dots, 0, 0);
+    tx.globalCompositeOperation = 'source-in';
+    tx.fillStyle = INK[plate];
+    tx.fillRect(0, 0, size, size);
+
+    const [rx, ry] = REG[plate];
+    o.save();
+    o.globalCompositeOperation = 'multiply';
+    o.drawImage(tin, rx, ry);
+    o.restore();
+  }
+  baked.set(key, out);
+  return out;
+}
+
+function starve(g, rng) {
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'destination-out';
+  const w = g.canvas.width, n = Math.round(w * 1.1);
+  for (let i = 0; i < n; i++) {
+    g.globalAlpha = 0.2 + rng() * 0.55;
+    g.beginPath();
+    g.arc(rng() * w, rng() * w, 0.5 + rng() * 2.0, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.restore();
+}
+
+
+/* ── craft kit ────────────────────────────────────────────────────────────────
+   Drawing vocabulary for scene plates. Copy this whole block into a new film,
+   between starve() and the scenes.
+
+   Shapes are Path2D values rather than marks on the context, so one shape can
+   be filled on one plate, knocked out of another and hatched on a third. That
+   is what plate discipline needs, and it removes the usual trap of rebuilding
+   a shape per ink and having the knockout miss.
+
+   Everything draws coverage in 1080-space: fill style is already '#000' and
+   globalAlpha is tone, so 0.4 means a 40% dot screen.                        */
+
+const TAU = Math.PI * 2;
+
+/* — shape builders ——————————————————————————————————————————————— */
+
+/** Catmull-Rom through pts, as a dense polyline. */
+function curve(pts, closed, per) {
+  per = per || 12;
+  const n = pts.length, out = [];
+  const at = (i) => pts[closed ? (i + n * 2) % n : clamp(i, 0, n - 1)];
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+    for (let k = 0; k < per; k++) {
+      const u = k / per, u2 = u * u, u3 = u2 * u;
+      out.push([
+        0.5 * (2 * p1[0] + (p2[0] - p0[0]) * u + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2
+               + (3 * p1[0] - p0[0] - 3 * p2[0] + p3[0]) * u3),
+        0.5 * (2 * p1[1] + (p2[1] - p0[1]) * u + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2
+               + (3 * p1[1] - p0[1] - 3 * p2[1] + p3[1]) * u3),
+      ]);
+    }
+  }
+  if (!closed) out.push(pts[n - 1].slice());
+  return out;
+}
+
+/** Points around an ellipse, for feeding cut(). */
+function ringPts(x, y, rx, ry, n, rot) {
+  const out = [], c = Math.cos(rot || 0), s = Math.sin(rot || 0);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU, px = Math.cos(th) * rx, py = Math.sin(th) * ry;
+    out.push([x + px * c - py * s, y + px * s + py * c]);
+  }
+  return out;
+}
+
+/**
+ * Closed hand-cut contour through control points: the silhouette builder.
+ * A shape made of arcs and ellipses reads as clip art however good the screen
+ * is, because every edge has the same machine curvature.
+ *   o.amp   edge waver in px — 2 is a drawn line, 8 is torn stock
+ *   o.tear  0..1 chance per sample of a deeper bite inward
+ */
+function cut(pts, rng, o) {
+  o = o || {};
+  const amp = o.amp === undefined ? 3 : o.amp, tear = o.tear || 0;
+  const c = curve(pts, true, o.per || 10), n = c.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = c[i], b = c[(i + 1) % n];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  const sgn = area > 0 ? 1 : -1;            // keep the normal pointing outward
+
+  /* Displace along the normal, then smooth: an unsmoothed tear lands on one
+     sample and reads as damage rather than as a bay in the edge. */
+  const w1 = makeWob(rng, 4), w2 = makeWob(rng, 9), d = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU;
+    d[i] = (w1(th) + w2(th * 3) * 0.3) * amp;
+    if (tear && rng() < tear) d[i] -= amp * (1.4 + rng() * 1.6);
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const s = Float32Array.from(d);
+    for (let i = 0; i < n; i++) d[i] = (s[(i - 1 + n) % n] + s[i] * 2 + s[(i + 1) % n]) * 0.25;
+  }
+
+  const p = new Path2D();
+  for (let i = 0; i < n; i++) {
+    const a = c[(i - 1 + n) % n], b = c[(i + 1) % n];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const x = c[i][0] + sgn * ty * d[i], y = c[i][1] - sgn * tx * d[i];
+    i ? p.lineTo(x, y) : p.moveTo(x, y);
+  }
+  p.closePath();
+  return p;
+}
+
+/**
+ * Variable-width ribbon along a path, as a fillable shape. Canvas has no
+ * pressure, so a constant lineWidth is the default and it is what makes stems,
+ * branches, whiskers and rigging read as wire. wfn(u) returns half-width.
+ */
+function nib(pts, wfn, o) {
+  o = o || {};
+  const c = o.raw ? pts : curve(pts, false, o.per || 10);
+  const n = c.length, L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const w = Math.max(0.01, wfn(i / (n - 1)));
+    L.push([c[i][0] - ty * w, c[i][1] + tx * w]);
+    R.push([c[i][0] + ty * w, c[i][1] - tx * w]);
+  }
+  const p = new Path2D();
+  p.moveTo(L[0][0], L[0][1]);
+  for (let i = 1; i < n; i++) p.lineTo(L[i][0], L[i][1]);
+  for (let i = n - 1; i >= 0; i--) p.lineTo(R[i][0], R[i][1]);
+  p.closePath();
+  return p;
+}
+
+/** Width profiles for nib(). */
+const wTip = (w) => (u) => w * (1 - u * u);                       // full, lifting to a point
+const wSwell = (w, at, k) => (u) => w * Math.exp(-Math.pow((u - at) / (k || 0.35), 2));
+const wLeaf = (w, skew) => (u) => w * Math.pow(Math.sin(Math.PI * Math.pow(u, skew || 0.55)), 1.15);
+
+/**
+ * Calligraphic width from a held nib: widest where the path runs across the
+ * nib's axis, thinnest where it runs along it. This is where hand-drawn line
+ * weight comes from, and it is what makes a contour read as drawn rather than
+ * traced. Pass the same polyline you give nib(), with raw: true.
+ */
+function wNib(c, w0, ang, floor) {
+  const n = c.length, f = floor === undefined ? 0.22 : floor;
+  return (u) => {
+    const i = clamp(Math.round(u * (n - 1)), 0, n - 1);
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    const th = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    return w0 * (f + (1 - f) * Math.abs(Math.sin(th - ang)));
+  };
+}
+
+/**
+ * A horizon band closed to the bottom of the frame: hills, treeline, roofline,
+ * wave. Stack several at falling tone and the air between them reads as depth.
+ *   o.amp  height of the undulation   o.freq  how many bumps across the frame
+ *   o.tilt fraction of W the far end drops   o.teeth adds a jagged octave
+ */
+function ridgeAt(y, o) {
+  const amp = o.amp === undefined ? 60 : o.amp;
+  const w = makeWob(o.rng, o.harm || 5), t = o.teeth ? makeWob(o.rng, 7) : null;
+  return (u) => y + w(u * (o.freq || 5)) * amp + (o.tilt || 0) * (u - 0.5) * W
+                + (t ? t(u * 37) * amp * 0.22 : 0);
+}
+
+/**
+ * Mountain profile: overlapping triangular peaks with a jagged octave on top,
+ * because a skyline built from smooth harmonics always reads as hills however
+ * tall it is. Same u -> y contract as ridgeAt, so ridge() takes either.
+ */
+function peaksAt(y, o) {
+  const amp = o.amp === undefined ? 90 : o.amp, n = o.n || 5, ps = [];
+  for (let i = 0; i < n; i++) {
+    ps.push({ c: (i + 0.5) / n + (o.rng() - 0.5) * 0.7 / n,
+              h: amp * (0.4 + o.rng() * 0.6), w: (0.55 + o.rng() * 0.9) / n,
+              lean: (o.rng() - 0.5) * 0.7 });
+  }
+  const jag = makeWob(o.rng, 8);
+  return (u) => {
+    let top = y;
+    for (const p of ps) {
+      const d = (u - p.c) / p.w;
+      const yy = y - p.h * Math.max(0, 1 - Math.abs(d)) * (1 + p.lean * (d > 0 ? 1 : -1));
+      if (yy < top) top = yy;
+    }
+    return top + jag(u * 26) * amp * 0.06;
+  };
+}
+
+/** x across the frame -> the u that ridgeAt takes, for planting on a skyline. */
+const ridgeU = (x) => (x + 60) / (W + 120);
+
+function ridge(y, o) {
+  o = o || {};
+  const f = typeof y === 'function' ? y : ridgeAt(y, o);
+  const n = o.n || 120, p = new Path2D();
+  p.moveTo(-60, W + 60);
+  for (let i = 0; i <= n; i++) p.lineTo(-60 + i / n * (W + 120), f(i / n));
+  p.lineTo(W + 60, W + 60);
+  p.closePath();
+  return p;
+}
+
+/* — paint operations ————————————————————————————————————————————— */
+
+/** Fill a shape at a tone. */
+function print(g, path, a) { tone(g, a === undefined ? 1 : a); g.fill(path); }
+
+/** Knock a shape out of the plate underneath it, at full coverage.
+    A knockout drawn at a tone leaves the screen's gaps behind, so the plate
+    below shows through the holes — always clear solid. */
+function carve(g, path) {
+  g.save();
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'destination-out';
+  g.fill(path);
+  g.restore();
+}
+
+/**
+ * Print a shape at an exact tone, clearing whatever the plate already holds
+ * beneath it. Tones on one plate add where they overlap, so a stack of ridges
+ * drawn back to front ends up solid at the bottom of the frame — which looks
+ * like a colour band rather than land. Every plane in a depth stack goes
+ * through here.
+ */
+function plane(g, path, a) { carve(g, path); print(g, path, a); }
+
+/** Outline a shape. Line work fades on width and alpha, never on coverage. */
+function keyline(g, path, w, a) {
+  tone(g, a === undefined ? 1 : a);
+  g.lineWidth = w === undefined ? 3 : w;
+  g.stroke(path);
+}
+
+/**
+ * Tone ramp inside a shape — a coverage gradient, which the screen turns into
+ * a dot-size ramp. This is the signature riso gesture and neither film uses it.
+ * Baked plates only: a live inkPass screens at one flat coverage, so a gradient
+ * there prints smooth, which is the thing the brief forbids.
+ *   o.stops  [[at, tone], ...]      o.x0,y0,x1,y1  linear
+ *   o.x,y,r0,r  radial
+ */
+function shade(g, path, o) {
+  g.save();
+  if (path) g.clip(path);
+  const grd = o.r !== undefined
+    ? g.createRadialGradient(o.x, o.y, o.r0 || 0, o.x, o.y, o.r)
+    : g.createLinearGradient(o.x0, o.y0, o.x1, o.y1);
+  for (const [at, a] of o.stops) grd.addColorStop(clamp(at, 0, 1), 'rgba(0,0,0,' + clamp(a, 0, 1) + ')');
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.globalAlpha = 1;
+  g.fillStyle = grd;
+  g.fillRect(-W, -W, W * 3, W * 3);
+  g.restore();
+}
+
+/**
+ * Parallel hatching clipped to a shape: tone made of line rather than dot.
+ * Next to the screen it reads as engraving, and it is how a mid-value stops
+ * being flat without adding another ink.
+ *   o.gap px between lines   o.w width   o.ang radians   o.a tone
+ *   o.fade(u) 0..1 thins across the run, for a shaded edge
+ *   o.cut hatches into the knockout instead, which is dry-brush at gap 3-5
+ */
+function hatch(g, path, rng, o) {
+  o = o || {};
+  const gap = o.gap || 10, span = W * 1.6;
+  const w = o.w || 2.2, a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (path) g.clip(path);
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.translate(CX, CY); g.rotate(o.ang === undefined ? -0.5 : o.ang); g.translate(-CX, -CY);
+  g.lineCap = 'round';
+  const n = Math.ceil(span * 2 / gap);
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1), f = o.fade ? clamp(o.fade(u), 0, 1) : 1;
+    if (f <= 0.02) continue;
+    g.globalAlpha = a * f;
+    g.lineWidth = w * (0.72 + rng() * 0.5) * clamp(f, 0.3, 1);
+    const y = CY - span + i * gap + (rng() - 0.5) * gap * 0.3;
+    g.beginPath();
+    for (let k = 0; k <= 7; k++) {
+      const x = CX - span + span * 2 * k / 7, yy = y + (rng() - 0.5) * 2.4;
+      k ? g.lineTo(x, yy) : g.moveTo(x, yy);
+    }
+    g.stroke();
+  }
+  g.restore();
+}
+
+/**
+ * Stipple inside a shape — a gradient made of grain instead of dots, for
+ * spray, mist, sand, snow, and the bloom where ink feathers at an edge.
+ * o.density(x, y) returns 0..1 and is the whole point: without it this is noise.
+ */
+function spray(g, path, rng, o) {
+  o = o || {};
+  const n = o.n || 900, r0 = o.r0 || 0.8, r1 = o.r1 || 3.0;
+  const b = o.box || [0, 0, W, W], a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < n; i++) {
+    const x = b[0] + rng() * b[2], y = b[1] + rng() * b[3];
+    const d = o.density ? o.density(x, y) : 1;
+    const keep = rng() < d, rr = r0 + rng() * (r1 - r0), av = 0.45 + rng() * 0.55;
+    if (!keep || (path && !g.isPointInPath(path, x, y))) continue;
+    g.globalAlpha = a * av;
+    g.beginPath();
+    g.arc(x, y, rr, 0, TAU);
+    g.fill();
+  }
+  g.restore();
+}
+
+/* There is no model() helper here on purpose. Shading a form by laying a second
+   ink across its shade side is the obvious move and it is wrong: study 3 in that
+   form printed an orange ball olive-brown. Model with shade(…, {cut: true}) on
+   the subject's own plate instead, and spend a second ink only on the smallest
+   darkest accent. */
+
+/** Contact shadow. A subject that does not touch its ground reads as a decal. */
+function bed(g, x, y, rx, ry, rng, a) {
+  const t = a === undefined ? 0.55 : a;
+  shade(g, cut(ringPts(x, y, rx, ry, 10), rng, { amp: rx * 0.06 }),
+        { x: x, y: y, r0: 0, r: rx, stops: [[0, t], [0.5, t * 0.5], [1, 0]] });
+}
+
+/* ── motion kit ───────────────────────────────────────────────────────────────
+   How a scene behaves, as against how it is drawn. Copy this block into a film
+   after the craft kit; it depends on clamp, lerp, cv, W, TAU, INK, REG, paper,
+   dotPattern and wobbler.
+
+   Two constraints shape everything in it:
+   - A frame is a pure function of t. State carried between frames breaks the
+     contract and verify.mjs catches it; an rng drawn per frame does not break
+     the contract, is not caught, and makes texture crawl. Vary in t, not in
+     frame count — wander() is the primitive for it.
+   - A live element screens at one flat coverage, so shade() cannot reach it.
+     Spatial tone on something that moves is bandPass().                      */
+
+/** Local 0..1 for an event at t0 lasting dur. Every timed thing starts here. */
+const phase = (t, t0, dur) => clamp((t - t0) / dur, 0, 1);
+
+/**
+ * Quantise time onto a step grid. Interpolated motion reads as a tween; held
+ * frames read as drawn animation, which is what the printed idiom wants — 1/12
+ * is on twos, and cuts and scene changes belong on the 0.25/0.5 s grid.
+ */
+const hold = (t, step) => Math.floor(t / step + 1e-9) * step;
+
+/* There is no easeInBack here on purpose. Anticipation staged as an easing
+   curve on the travel is a shape sliding backwards; study 10 got it by giving
+   the bird a crouch to hold and a branch to load, which is a pose and a phase,
+   not a curve. Reach for a curve only once the pose exists. */
+const easeOutQuad = (u) => 1 - (1 - u) * (1 - u);   // thrown: leaves fast, then coasts
+
+/**
+ * Mass arriving somewhere and ringing down. Anything with weight that stops
+ * against something — a lid, a released branch, a landed bird, a float — rings
+ * past its rest and comes back. easeOutCubic merely decelerates, which reads as
+ * a machine parking, and is the wrong default for everything that has weight.
+ *   o.bounces  half-cycles before rest: 1 a heavy lid, 2 a branch, 3 a whisker
+ *   o.damp     higher is stiffer
+ */
+function settle(u, o) {
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  o = o || {};
+  const n = o.bounces === undefined ? 2 : o.bounces, k = o.damp === undefined ? 5 : o.damp;
+  const f = (x) => 1 - Math.exp(-k * x) * Math.cos(n * Math.PI * x);
+  return f(u) + (1 - f(1)) * u;                  // land exactly on 1
+}
+
+/**
+ * Deterministic wander in t: one sine stack sampled at t, never a fresh rng
+ * draw per frame. This is what lets a flame, a flag or a water surface vary
+ * without crawling. Periodic with period 1/hz, so anything driven by it loops
+ * seamlessly; give separate parts separate keys or they all breathe together.
+ */
+const wander = (key, hz, harmonics) => {
+  const w = wobbler(key, harmonics || 3);
+  return (t) => w(TAU * hz * t);
+};
+
+const scratch2 = cv(W, W), s2x = scratch2.getContext('2d');
+
+/**
+ * Spatial tone on a live element. inkPass screens a whole pass at one flat
+ * coverage: a gradient drawn into it survives as dots of constant size at
+ * varying opacity, which prints as smooth ink — the one thing this look cannot
+ * afford. Bands give the dot ramp back. Each band is its own quantised
+ * coverage, so the dot itself steps up across the form.
+ *
+ * bands are [{coverage, draw(g)}, …], lightest first, each one a region rather
+ * than a gradient. A band clears what earlier bands left where it lands,
+ * because two screens overlapping print denser than either — the same reason
+ * plane() exists for baked plates. A band at coverage 0 is therefore a
+ * knockout, which is how a live highlight gets back to bare paper.
+ *
+ * Four steps read as a ramp at 1080. dotPattern quantises to 1/16, so steps
+ * closer than 0.06 apart are the same band drawn twice. Each band costs one
+ * full-canvas pattern fill, so this is for the one element in the frame that is
+ * both moving and modelled, not for everything that moves.
+ */
+function bandPass(ctx, name, opts, bands) {
+  opts = opts || {};
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+
+  for (const b of bands) {
+    // Path bands clear and screen in one scratch surface. The drawing callback
+    // route remains for bands with arbitrary masks or drawing operations.
+    if(b.path){
+      const c=clamp(b.coverage===undefined?1:b.coverage,0,1);
+      sx.save();if(b.clipPath)sx.clip(b.clipPath);
+      sx.globalCompositeOperation='destination-out';sx.fillStyle='#000';sx.fill(b.path);
+      if(c>.001){sx.globalCompositeOperation='source-over';sx.fillStyle=c<1?dotPattern(sx,name,c):'#000';sx.fill(b.path);}
+      sx.restore();continue;
+    }
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.lineCap = 'round';
+    s2x.lineJoin = 'round';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+
+    sx.save();                                   // this band owns its value
+    sx.globalCompositeOperation = 'destination-out';
+    sx.drawImage(scratch2, 0, 0);
+    sx.restore();
+
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    if (c < 1) {
+      s2x.save();
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+      s2x.restore();
+    }
+    sx.drawImage(scratch2, 0, 0);
+  }
+
+  sx.save();
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/**
+ * Put paper back under a live light. Every live pass multiplies, so a bright
+ * moving element over a printed night can only get brighter by taking the night
+ * away first; a pale ink screened straight over it prints mud.
+ *
+ * The opening is banded for the same reason ink is: a soft-edged mask fades the
+ * night's dots in opacity instead of shrinking them, which is smooth ink by
+ * another route. Bands here union rather than accumulate — dotPattern grows one
+ * dot grid, so a lower coverage is a subset of a higher one — and name picks
+ * which screen the opening is cut on. Use the screen of the ink about to print
+ * over it, or the two grids beat.
+ *
+ * relight puts paper back over everything already in the frame, baked included.
+ * Anything inside the opening that must survive is drawn after it.
+ */
+function relight(ctx, name, bands) {
+  for (const b of bands) {
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+    if (c < 1) {
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+    }
+    s2x.globalCompositeOperation = 'source-in';
+    s2x.drawImage(paper, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(scratch2, 0, 0);
+    ctx.restore();
+  }
+}
+
+
+/* Lumen's scene library. All contours shared by plates are built before ink branches. */
+/* ── sound kit ────────────────────────────────────────────────────────────────
+   Deterministic score synthesis for renderAudio(). Copy this block after the
+   motion kit. Depends on rngFor, clamp, lerp and W. Every noise buffer is
+   seeded by key, every envelope starts and ends at silence, and nothing reads
+   a clock or Math.random, so a cold render is repeatable and audio.mjs --twice
+   can prove it.
+
+   Time arguments are film seconds. Instruments take the score `s` first, then
+   `at`, then options. `hit` in options places the loudest moment on that time
+   by starting the sound `attack` earlier; use it wherever the picture has a
+   visible arrival. Levels are linear gains before the master; the mix is
+   scaled once after render to a loudness target, so balance voices against
+   each other rather than against full scale.
+
+   Top-level names the block declares, so a film can spot a collision before
+   pasting: RATE, TINY, hz, note, MODES, degree, grid, Score, impulse,
+   integratedLufs, truePeakLinear, wavBase64, onset, pad, struck, mallet, glass,
+   bell, musicBox, pluck, fm, organ, sub, tick, breath, wind, rain, drop,
+   MATERIALS, contact, paper (renamed rustle here: the film's paper is its stock), riser, air.
+   ───────────────────────────────────────────────────────────────────────── */
+
+const RATE = 48000;
+const TINY = 1e-4;                       // exponential ramps cannot reach 0
+const hz = (midi) => 440 * Math.pow(2, (midi - 69) / 12);
+const NOTE_INDEX = { C: 0, D: 2, E: 4, F: 5, G: 7, A: 9, B: 11 };
+/** 'F#3' -> 54. Octave 4 holds middle C. */
+const note = (name) => {
+  const m = /^([A-G])([#b]?)(-?\d)$/.exec(name);
+  return 12 * (Number(m[3]) + 1) + NOTE_INDEX[m[1]] + (m[2] === '#' ? 1 : m[2] === 'b' ? -1 : 0);
+};
+const MODES = {
+  major: [0, 2, 4, 5, 7, 9, 11], lydian: [0, 2, 4, 6, 7, 9, 11], mixolydian: [0, 2, 4, 5, 7, 9, 10],
+  dorian: [0, 2, 3, 5, 7, 9, 10], minor: [0, 2, 3, 5, 7, 8, 10], pentatonic: [0, 2, 4, 7, 9],
+  minorPentatonic: [0, 3, 5, 7, 10], wholeTone: [0, 2, 4, 6, 8, 10],
+};
+/** Scale degree (0-based, any octave, negative allowed) to midi. */
+const degree = (root, mode, d) => {
+  const steps = MODES[mode], n = steps.length, oct = Math.floor(d / n), i = ((d % n) + n) % n;
+  return root + oct * 12 + steps[i];
+};
+/** Beat grid: g.at(beat) is the film time of a beat; g.beat is one beat in seconds. */
+const grid = (bpm, offset = 0) => ({ bpm, beat: 60 / bpm, at: (b) => offset + b * 60 / bpm, quantise: (t) => offset + Math.round((t - offset) * bpm / 60) * 60 / bpm });
+
+/** Build one score. duration is the film's DUR; the buffer is exactly that long. */
+function Score({ duration, rate = RATE, key = 'score', room = {} } = {}) {
+  const ac = new OfflineAudioContext(2, Math.ceil(rate * duration), rate);
+  const s = { ac, rate, duration, key, buffers: new Map(), stats: null };
+
+  // Buses. The master carries only a rumble filter; loudness is set after render
+  // with one static gain, because DynamicsCompressor differs between engines.
+  s.master = ac.createGain();
+  const rumble = ac.createBiquadFilter(); rumble.type = 'highpass'; rumble.frequency.value = 28; rumble.Q.value = .5;
+  s.master.connect(rumble).connect(ac.destination);
+  s.bus = {};
+  for (const name of ['bed', 'fore', 'fx']) { const g = ac.createGain(); g.connect(s.master); s.bus[name] = g; }
+
+  // Reverb: synthesised IR, normalize off so the wet level is ours. The send is
+  // high-passed so bass stays dry and centred; the return is low-passed so the
+  // tail does not accumulate hiss over a long film.
+  const verb = ac.createConvolver(); verb.normalize = false; verb.buffer = impulse(s, key + ':room', room);
+  const sendIn = ac.createBiquadFilter(); sendIn.type = 'highpass'; sendIn.frequency.value = room.sendHighpass ?? 180;
+  const ret = ac.createBiquadFilter(); ret.type = 'lowpass'; ret.frequency.value = room.returnLowpass ?? 6500; ret.Q.value = .4;
+  s.wet = ac.createGain(); s.wet.gain.value = room.wet ?? .28;
+  sendIn.connect(verb).connect(ret).connect(s.wet).connect(s.master);
+  s.sendIn = sendIn;
+
+  /** Pan and route a node. x is a screen coordinate 0..W; pan overrides it. */
+  s.place = (node, { pan = null, x = null, send = .3, bus = 'fore' } = {}) => {
+    const p = ac.createStereoPanner();
+    p.pan.value = pan !== null ? clamp(pan, -1, 1) : x !== null ? clamp((x - W / 2) / (W / 2), -1, 1) * .7 : 0;
+    node.connect(p).connect(s.bus[bus]);
+    if (send > 0) { const g = ac.createGain(); g.gain.value = send; p.connect(g).connect(sendIn); }
+    return p;
+  };
+
+  /** Seeded noise, cached per key. color: white | pink | brown. */
+  s.noise = (key, seconds, color = 'white') => {
+    const k = `${key}|${seconds}|${color}`;
+    if (s.buffers.has(k)) return s.buffers.get(k);
+    const n = Math.ceil(seconds * rate), b = ac.createBuffer(1, n, rate), d = b.getChannelData(0), r = rngFor(key);
+    let b0 = 0, b1 = 0, b2 = 0, low = 0;
+    for (let i = 0; i < n; i++) {
+      const w = r() * 2 - 1;
+      if (color === 'white') d[i] = w;
+      else if (color === 'brown') { low = (low + .02 * w) / 1.02; d[i] = low * 3.5; }
+      else { b0 = .99765 * b0 + w * .0990460; b1 = .96300 * b1 + w * .2965164; b2 = .57000 * b2 + w * 1.0526913; d[i] = (b0 + b1 + b2 + w * .1848) * .11; }
+    }
+    s.buffers.set(k, b);
+    return b;
+  };
+
+  /** Click-safe envelope on a gain param: linear attack from silence, hold, exponential release. */
+  s.env = (param, at, { attack = .01, hold = 0, release = .3, peak = .1, end = null } = {}) => {
+    const a = Math.max(attack, .003), stop = end ?? at + a + hold + release;
+    param.setValueAtTime(TINY, at);
+    param.linearRampToValueAtTime(Math.max(peak, TINY), at + a);
+    if (hold > 0) param.setValueAtTime(Math.max(peak, TINY), at + a + hold);
+    param.exponentialRampToValueAtTime(TINY, Math.min(stop, duration));
+    return Math.min(stop, duration);
+  };
+
+  /** Rounded swell (sin^2 rise, sin^2 fall) peaking at fraction `peakAt` of dur. Owns its param. */
+  s.swell = (param, at, dur, peak, peakAt = .45) => {
+    const n = 128, curve = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const u = i / (n - 1), v = u < peakAt ? u / peakAt : (1 - u) / (1 - peakAt); curve[i] = TINY + peak * Math.pow(Math.sin(v * Math.PI / 2), 2); }
+    param.setValueCurveAtTime(curve, at, Math.max(.01, Math.min(dur, duration - at - .001)));
+  };
+
+  /** An oscillator that stops after its envelope; returns the gain node to route. */
+  s.osc = (type, freq, at, stop, { detune = 0 } = {}) => {
+    const o = ac.createOscillator(); o.type = type; o.frequency.value = freq; o.detune.value = detune;
+    o.start(at); o.stop(Math.min(duration, stop + .05));
+    return o;
+  };
+
+  /** A buffer source that stops after `stop`. */
+  s.play = (buffer, at, stop, { offset = 0, rate: pr = 1, loop = false } = {}) => {
+    const src = ac.createBufferSource(); src.buffer = buffer; src.loop = loop; src.playbackRate.value = pr;
+    src.start(at, offset); src.stop(Math.min(duration, stop + .05));
+    return src;
+  };
+
+  /**
+   * Render, then scale once to `target` LUFS, pulling back if the true peak
+   * would pass `ceiling` dBTP. s.stats records what was measured and applied.
+   */
+  s.render = async ({ target = -16, ceiling = -1 } = {}) => {
+    const buf = await ac.startRendering();
+    const chs = Array.from({ length: buf.numberOfChannels }, (_, i) => buf.getChannelData(i));
+    const lufs = integratedLufs(chs, rate);
+    let gain = Number.isFinite(lufs) ? Math.pow(10, (target - lufs) / 20) : 1;
+    const tp = truePeakLinear(chs) * gain, tpDb = 20 * Math.log10(Math.max(tp, 1e-9));
+    if (tpDb > ceiling) gain *= Math.pow(10, (ceiling - tpDb) / 20);
+    for (const d of chs) for (let i = 0; i < d.length; i++) d[i] *= gain;
+    s.stats = { measuredLufs: lufs, gainDb: 20 * Math.log10(gain), deliveredLufs: lufs + 20 * Math.log10(gain), truePeakDb: 20 * Math.log10(Math.max(tp / (tpDb > ceiling ? Math.pow(10, (tpDb - ceiling) / 20) : 1), 1e-9)) };
+    return buf;
+  };
+  return s;
+}
+
+/** Synthesised room: pre-delay, a few early taps, then a noise tail that darkens as it decays. */
+function impulse(s, key, { seconds = 2.2, decay = .6, predelay = .015, early = [[.007, .6], [.013, .45], [.021, .35], [.029, .28], [.037, .2]], damp = .65 } = {}) {
+  const rate = s.rate, n = Math.ceil(rate * (seconds + predelay)), b = s.ac.createBuffer(2, n, rate);
+  for (let ch = 0; ch < 2; ch++) {
+    const d = b.getChannelData(ch), r = rngFor(`${key}:${ch}`), start = Math.floor(predelay * rate);
+    let lp = 0;
+    for (let i = start; i < n; i++) {
+      const t = (i - start) / rate, a = lerp(.15, damp + .3, clamp(t / seconds, 0, 1));   // one-pole lowpass closing over the tail
+      lp = lp * a + (r() * 2 - 1) * (1 - a);
+      d[i] = lp * Math.exp(-t / (decay * .45)) * Math.min(1, t / .004);
+    }
+    early.forEach(([t, g], k) => { const i = Math.floor((t + (ch ? .0011 * (k % 2) : 0)) * rate); if (i < n) d[i] += g * (k % 2 ? -1 : 1); });
+    let e = 0; for (let i = 0; i < n; i++) e += d[i] * d[i];
+    const norm = 1 / Math.sqrt(e / rate); for (let i = 0; i < n; i++) d[i] *= norm * .35;
+  }
+  return b;
+}
+
+/* Loudness inside the page, so a film can normalise itself; tools/lib/audio.mjs
+   is the reference implementation and audio.mjs verifies the result. */
+function integratedLufs(chs, rate) {
+  const K = Math.tan(Math.PI * 1681.974450955533 / rate), Vh = Math.pow(10, 3.999843853973347 / 20), Vb = Math.pow(Vh, .4996667741545416), Q = .7071752369554196, a0 = 1 + K / Q + K * K;
+  const shelf = [(Vh + Vb * K / Q + K * K) / a0, 2 * (K * K - Vh) / a0, (Vh - Vb * K / Q + K * K) / a0, 2 * (K * K - 1) / a0, (1 - K / Q + K * K) / a0];
+  const K2 = Math.tan(Math.PI * 38.13547087602444 / rate), Q2 = .5003270373238773, a02 = 1 + K2 / Q2 + K2 * K2;
+  const hp = [1, -2, 1, 2 * (K2 * K2 - 1) / a02, (1 - K2 / Q2 + K2 * K2) / a02];
+  const filt = (x, [b0, b1, b2, a1, a2]) => { const y = new Float32Array(x.length); let x1 = 0, x2 = 0, y1 = 0, y2 = 0; for (let i = 0; i < x.length; i++) { const v = b0 * x[i] + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2; x2 = x1; x1 = x[i]; y2 = y1; y1 = v; y[i] = v; } return y; };
+  const k = chs.map(c => filt(filt(c, shelf), hp)), w = Math.round(.4 * rate), h = Math.round(.1 * rate), blocks = [];
+  for (let st = 0; st + w <= k[0].length; st += h) { let z = 0; for (const c of k) { let acc = 0; for (let i = st; i < st + w; i++) acc += c[i] * c[i]; z += acc / w; } blocks.push(z); }
+  const lufs = (z) => -.691 + 10 * Math.log10(Math.max(z, 1e-20));
+  const abs = blocks.filter(z => lufs(z) > -70); if (!abs.length) return -Infinity;
+  const rel = lufs(abs.reduce((a, b) => a + b, 0) / abs.length) - 10, kept = abs.filter(z => lufs(z) > rel);
+  return kept.length ? lufs(kept.reduce((a, b) => a + b, 0) / kept.length) : -Infinity;
+}
+function truePeakLinear(chs) {
+  const L = 4, taps = 48, h = []; for (let m = 0; m < taps; m++) { const x = (m - 23.5) / L; h.push((x === 0 ? 1 : Math.sin(Math.PI * x) / (Math.PI * x)) * (.42 - .5 * Math.cos(2 * Math.PI * m / 47) + .08 * Math.cos(4 * Math.PI * m / 47))); }
+  const ph = Array.from({ length: L }, (_, p) => { const v = []; for (let k = 0; k < 12; k++) v.push(h[k * L + p]); const sum = v.reduce((a, b) => a + b, 0); return v.map(x => x / sum); });
+  let peak = 0;
+  for (const c of chs) for (let i = 0; i < c.length; i++) for (let p = 0; p < L; p++) { let acc = 0; for (let k = 0; k < 12; k++) { const j = i - k + 6; if (j >= 0 && j < c.length) acc += ph[p][k] * c[j]; } if (Math.abs(acc) > peak) peak = Math.abs(acc); }
+  return peak;
+}
+
+/** Base64 16-bit stereo WAV of an AudioBuffer: the renderAudio() return value. */
+function wavBase64(buf) {
+  const n = buf.length, bytes = 44 + n * 4, dv = new DataView(new ArrayBuffer(bytes));
+  const ascii = (o, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(o + i, str.charCodeAt(i)); };
+  ascii(0, 'RIFF'); dv.setUint32(4, bytes - 8, true); ascii(8, 'WAVEfmt '); dv.setUint32(16, 16, true);
+  dv.setUint16(20, 1, true); dv.setUint16(22, 2, true); dv.setUint32(24, buf.sampleRate, true);
+  dv.setUint32(28, buf.sampleRate * 4, true); dv.setUint16(32, 4, true); dv.setUint16(34, 16, true);
+  ascii(36, 'data'); dv.setUint32(40, n * 4, true);
+  const L = buf.getChannelData(0), R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : L;
+  for (let i = 0; i < n; i++) { dv.setInt16(44 + i * 4, Math.round(clamp(L[i], -1, 1) * 32767), true); dv.setInt16(46 + i * 4, Math.round(clamp(R[i], -1, 1) * 32767), true); }
+  const u8 = new Uint8Array(dv.buffer); let str = '';
+  for (let i = 0; i < u8.length; i += 0x8000) str += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(str);
+}
+
+/* Instruments. `o.hit` places the peak; otherwise `at` is the onset. */
+const onset = (at, o, attack) => o.hit !== undefined ? o.hit - attack : at;
+
+/** Sustained chord: detuned voices through a lowpass that opens slowly. Bed bus by default. */
+function pad(s, at, end, notes, o = {}) {
+  const { level = .05, attack = 1, release = 1.4, cutoff = 1400, open = 600, type = 'triangle', spread = .8, send = .5, bus = 'bed' } = o;
+  const env = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = .4;
+  f.frequency.setValueAtTime(cutoff, at); f.frequency.linearRampToValueAtTime(cutoff + open, at + attack * 1.6);
+  env.gain.setValueAtTime(TINY, at); env.gain.linearRampToValueAtTime(level, at + attack);
+  env.gain.setValueAtTime(level, Math.max(at + attack, end - release)); env.gain.linearRampToValueAtTime(TINY, Math.min(end, s.duration));
+  f.connect(env); s.place(env, { send, bus, pan: 0 });
+  notes.forEach((n, i) => [-5, 5].forEach((det, j) => {
+    const p = s.ac.createStereoPanner(); p.pan.value = notes.length > 1 ? (i / (notes.length - 1) - .5) * spread : 0;
+    const g = s.ac.createGain(); g.gain.value = j ? .55 : .45;
+    s.osc(j ? 'sine' : type, hz(n), at, end, { detune: det }).connect(g).connect(p).connect(f);
+  }));
+}
+
+/** Additive struck tone. partials: [ratio, amplitude, decay seconds]. strike adds a noise contact. */
+function struck(s, at, midi, partials, o = {}) {
+  const { level = .1, attack = .004, pan = 0, x = null, send = .45, strike = 0, strikeHz = 3000, bus = 'fore' } = o;
+  const t0 = onset(at, o, attack), f0 = hz(midi), sum = s.ac.createGain(); sum.gain.value = 1;
+  let longest = 0;
+  partials.forEach(([ratio, amp, decay]) => {
+    const g = s.ac.createGain(); const stop = s.env(g.gain, t0, { attack, release: decay, peak: level * amp }); longest = Math.max(longest, stop);
+    s.osc('sine', f0 * ratio, t0, stop).connect(g).connect(sum);
+  });
+  if (strike > 0) {                       // 3 ms of filtered noise is what reads as contact
+    const g = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = strikeHz; f.Q.value = 1.2;
+    s.env(g.gain, t0, { attack: .001, release: .012, peak: level * strike });
+    s.play(s.noise(s.key + ':strike', .05), t0, t0 + .03).connect(f).connect(g).connect(sum);
+  }
+  s.place(sum, { pan: x === null ? pan : null, x, send, bus });
+  return longest;
+}
+const mallet = (s, at, midi, o = {}) => struck(s, at, midi, [[1, 1, o.decay ?? .9], [3.93, .28, .25], [9.72, .08, .1]], { strike: .5, strikeHz: 2600, ...o });
+const glass = (s, at, midi, o = {}) => struck(s, at, midi, [[1, 1, o.decay ?? 1.7], [2.001, .12, 1.1], [3.98, .03, .6]], { attack: .02, ...o });
+const bell = (s, at, midi, o = {}) => struck(s, at, midi, [[1, 1, o.decay ?? 3], [1.5, .35, 2.2], [2, .5, 2.6], [2.4, .25, 1.8], [3, .3, 1.6], [4.2, .14, 1.1], [5.4, .08, .8]], { attack: .003, strike: .25, strikeHz: 5000, ...o });
+const musicBox = (s, at, midi, o = {}) => struck(s, at, midi, [[1, 1, o.decay ?? .6], [2, .2, .3], [3, .12, .2]], { attack: .002, strike: .35, strikeHz: 4200, ...o });
+
+/** Plucked string, Karplus-Strong written straight into a buffer so the recurrence is exact. */
+function pluck(s, at, midi, o = {}) {
+  const { level = .12, dur = 1.6, bright = .5, damp = .996, pan = 0, x = null, send = .35, bus = 'fore', key = 'pluck' } = o;
+  const t0 = onset(at, o, .002), rate = s.rate, N = Math.max(2, Math.round(rate / hz(midi))), n = Math.ceil(rate * dur);
+  const b = s.ac.createBuffer(1, n, rate), d = b.getChannelData(0), r = rngFor(`${s.key}:${key}:${midi}:${at.toFixed(3)}`);
+  let lp = 0;
+  for (let i = 0; i < N; i++) { const w = r() * 2 - 1; lp = lp * (1 - bright) + w * bright; d[i] = lp; }   // pick brightness
+  for (let i = N; i < n; i++) d[i] = damp * .5 * (d[i - N] + d[i - N - 1 < 0 ? 0 : i - N - 1]);
+  const g = s.ac.createGain(); g.gain.setValueAtTime(TINY, t0); g.gain.linearRampToValueAtTime(level, t0 + .002);
+  g.gain.setValueAtTime(level, t0 + dur - .12); g.gain.linearRampToValueAtTime(TINY, t0 + dur);
+  s.play(b, t0, t0 + dur).connect(g); s.place(g, { pan: x === null ? pan : null, x, send, bus });
+}
+
+/** Two-operator FM: ratio 1 with a falling index is an electric piano, 3.5-7 is a bell. */
+function fm(s, at, midi, o = {}) {
+  const { level = .1, ratio = 1, index = 4, indexEnd = .6, indexDecay = .25, attack = .004, release = 1.4, pan = 0, x = null, send = .4, bus = 'fore', lowpass = 0 } = o;
+  const t0 = onset(at, o, attack), f0 = hz(midi), g = s.ac.createGain();
+  const stop = s.env(g.gain, t0, { attack, release, peak: level });
+  const car = s.osc('sine', f0, t0, stop), mod = s.osc('sine', f0 * ratio, t0, stop), depth = s.ac.createGain();
+  depth.gain.setValueAtTime(f0 * index, t0); depth.gain.exponentialRampToValueAtTime(Math.max(f0 * indexEnd, TINY), t0 + indexDecay);
+  mod.connect(depth).connect(car.frequency);
+  if (lowpass) { const f = s.ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = lowpass; car.connect(f).connect(g); } else car.connect(g);
+  s.place(g, { pan: x === null ? pan : null, x, send, bus });
+}
+
+/** Additive organ held from at to end. drawbars: [ratio, amplitude]. */
+function organ(s, at, end, midi, o = {}) {
+  const { level = .05, attack = .06, release = .12, drawbars = [[.5, .5], [1, 1], [2, .6], [3, .3], [4, .25], [6, .1], [8, .06]], pan = 0, send = .5, bus = 'bed' } = o;
+  const g = s.ac.createGain(); g.gain.setValueAtTime(TINY, at); g.gain.linearRampToValueAtTime(level, at + attack);
+  g.gain.setValueAtTime(level, Math.max(at + attack, end - release)); g.gain.linearRampToValueAtTime(TINY, Math.min(end, s.duration));
+  const norm = 1 / drawbars.reduce((a, [, amp]) => a + amp, 0);
+  drawbars.forEach(([ratio, amp]) => { const v = s.ac.createGain(); v.gain.value = amp * norm; s.osc('sine', hz(midi) * ratio, at, end).connect(v).connect(g); });
+  s.place(g, { pan, send, bus });
+}
+
+/** Sub bass: sine with a short pitch drop, centred and dry. */
+function sub(s, at, midi, o = {}) {
+  const { level = .09, attack = .03, release = 1.2, drop = 12 } = o;
+  const t0 = onset(at, o, attack), g = s.ac.createGain(), stop = s.env(g.gain, t0, { attack, release, peak: level });
+  const osc = s.osc('sine', hz(midi + drop), t0, stop); osc.frequency.exponentialRampToValueAtTime(hz(midi), t0 + .04);
+  osc.connect(g); s.place(g, { pan: 0, send: 0, bus: 'bed' });
+}
+
+/** Clock tick: a millisecond of noise through a narrow band. Alternate `freq` for tick-tock. */
+function tick(s, at, o = {}) {
+  const { level = .08, freq = 4200, q = 9, decay = .012, pan = 0, send = .15 } = o;
+  const g = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = freq; f.Q.value = q;
+  s.env(g.gain, at, { attack: .0008, release: decay, peak: level });
+  s.play(s.noise(s.key + ':tick', .1), at, at + decay + .01).connect(f).connect(g); s.place(g, { pan, send, bus: 'fx' });
+}
+
+/** Band-swept noise following a motion: from -> to Hz, loudest at `peakAt` of dur. A whoosh or a breath. */
+function breath(s, at, dur, o = {}) {
+  const { level = .08, from = 420, to = 1000, back = null, q = .5, peakAt = .42, pan = 0, x = null, send = .5, color = 'pink', key = 'breath' } = o;
+  const g = s.ac.createGain(), f = s.ac.createBiquadFilter(), soft = s.ac.createBiquadFilter();
+  f.type = 'bandpass'; f.Q.value = q; soft.type = 'lowpass'; soft.frequency.value = 2400; soft.Q.value = .4;
+  f.frequency.setValueAtTime(from, at); f.frequency.exponentialRampToValueAtTime(to, at + dur * peakAt);
+  f.frequency.exponentialRampToValueAtTime(back ?? from, at + dur);
+  s.swell(g.gain, at, dur, level, peakAt);
+  s.play(s.noise(`${s.key}:${key}`, dur + .1, color), at, at + dur).connect(f).connect(soft).connect(g);
+  s.place(g, { pan: x === null ? pan : null, x, send, bus: 'fx' });
+}
+
+/** Wind from at to end: bandpassed noise whose centre and level wander on a seeded slow walk. */
+function wind(s, at, end, o = {}) {
+  const { level = .06, centre = 520, sweep = 320, gust = .6, whistle = .12, pan = 0, send = .35, key = 'wind', rise = 1.5, fall = 1.5 } = o;
+  const dur = end - at, rate = s.rate;
+  // The slow walk is a buffer, so the gusts are as seeded as everything else.
+  const walk = s.ac.createBuffer(1, Math.ceil(rate * dur), rate), d = walk.getChannelData(0), r = rngFor(`${s.key}:${key}:walk`);
+  let v = 0, target = 0, k = 0;
+  for (let i = 0; i < d.length; i++) { if (k-- <= 0) { target = r() * 2 - 1; k = Math.floor(rate * (.4 + r() * 1.4)); } v += (target - v) * 1.5e-5; d[i] = v; }
+  const walkSrc = s.play(walk, at, end), toHz = s.ac.createGain(), toGain = s.ac.createGain();
+  toHz.gain.value = sweep; toGain.gain.value = gust * level;
+  const f = s.ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = centre; f.Q.value = .9;
+  const g = s.ac.createGain(); g.gain.setValueAtTime(TINY, at); g.gain.linearRampToValueAtTime(level, at + rise);
+  g.gain.setValueAtTime(level, Math.max(at + rise, end - fall)); g.gain.linearRampToValueAtTime(TINY, Math.min(end, s.duration));
+  walkSrc.connect(toHz).connect(f.frequency); walkSrc.connect(toGain).connect(g.gain);
+  s.play(s.noise(`${s.key}:${key}`, Math.min(dur, 8), 'brown'), at, end, { loop: true }).connect(f).connect(g);
+  if (whistle > 0) { const w = s.ac.createBiquadFilter(); w.type = 'bandpass'; w.frequency.value = centre * 4; w.Q.value = 4; const wg = s.ac.createGain(); wg.gain.value = whistle; f.connect(w).connect(wg).connect(g); }
+  s.place(g, { pan, send, bus: 'fx' });
+}
+
+/** Rain from at to end: seeded droplet ticks through resonators over a low wash. */
+function rain(s, at, end, o = {}) {
+  const { level = .05, density = 260, wash = .5, bright = 4200, pan = 0, send = .3, key = 'rain', rise = 1, fall = 1 } = o;
+  const dur = end - at, rate = s.rate, n = Math.ceil(rate * dur), b = s.ac.createBuffer(1, n, rate), d = b.getChannelData(0), r = rngFor(`${s.key}:${key}`);
+  for (let count = Math.floor(density * dur); count > 0; count--) {
+    const i0 = Math.floor(r() * n), f = 1800 + r() * 4200, decay = rate * (.004 + r() * .01), amp = .25 + r() * .75, len = Math.min(n - i0, Math.floor(decay * 5));
+    for (let i = 0; i < len; i++) d[i0 + i] += amp * Math.sin(i / rate * f * 2 * Math.PI) * Math.exp(-i / decay);
+  }
+  const g = s.ac.createGain(); g.gain.setValueAtTime(TINY, at); g.gain.linearRampToValueAtTime(level, at + rise);
+  g.gain.setValueAtTime(level, Math.max(at + rise, end - fall)); g.gain.linearRampToValueAtTime(TINY, Math.min(end, s.duration));
+  const f = s.ac.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = bright * 1.8; f.Q.value = .5;
+  s.play(b, at, end).connect(f).connect(g);
+  if (wash > 0) { const w = s.ac.createBiquadFilter(); w.type = 'lowpass'; w.frequency.value = bright * .5; const wg = s.ac.createGain(); wg.gain.value = wash * .5; s.play(s.noise(`${s.key}:${key}:wash`, Math.min(dur, 6), 'pink'), at, end, { loop: true }).connect(w).connect(wg).connect(g); }
+  s.place(g, { pan, send, bus: 'fx' });
+}
+
+/** Water drop: a contact tick and a rising chirp (Farnell's bubble). Lower `f0` is a bigger drop. */
+function drop(s, at, o = {}) {
+  const { level = .1, f0 = 900, rise = 1.8, dur = .11, pan = 0, x = null, send = .5, tick: tk = .3 } = o;
+  const t0 = onset(at, o, .002), rate = s.rate, n = Math.ceil(rate * dur), b = s.ac.createBuffer(1, n, rate), d = b.getChannelData(0);
+  let ph = 0;
+  for (let i = 0; i < n; i++) { const t = i / rate; ph += 2 * Math.PI * f0 * (1 + rise * t / dur) / rate; d[i] = Math.sin(ph) * Math.exp(-t / (dur * .3)) * Math.min(1, t / .002); }
+  const g = s.ac.createGain(); g.gain.value = level; s.play(b, t0, t0 + dur).connect(g);
+  if (tk > 0) { const c = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 2500; s.env(c.gain, t0, { attack: .0006, release: .006, peak: level * tk }); s.play(s.noise(s.key + ':droptick', .05), t0, t0 + .02).connect(f).connect(c).connect(g); }
+  s.place(g, { pan: x === null ? pan : null, x, send, bus: 'fx' });
+}
+
+/** Struck material: an exciter through parallel modes. The exciter's speed is what reads as hard or soft. */
+const MATERIALS = {
+  wood: { modes: [[1, 1, .09], [2.8, .5, .06], [4.3, .3, .04]], exciter: 3200, burst: .003, q: 14 },
+  metal: { modes: [[1, 1, 1.4], [1.6, .6, 1.1], [2.3, .5, .9], [3.4, .35, .7], [4.8, .2, .5]], exciter: 7000, burst: .002, q: 28 },
+  stone: { modes: [[1, 1, .045], [1.7, .6, .035], [2.6, .4, .025]], exciter: 2200, burst: .006, q: 4 },
+  felt: { modes: [[1, 1, .05], [2.1, .3, .03]], exciter: 500, burst: .02, q: 2 },
+  card: { modes: [[1, 1, .04], [2.2, .5, .03], [3.1, .3, .02]], exciter: 1800, burst: .005, q: 5 },
+};
+function contact(s, at, o = {}) {
+  const { material = 'wood', f0 = 220, level = .12, pan = 0, x = null, send = .4, key = 'contact' } = o;
+  const m = MATERIALS[material], t0 = onset(at, o, .001), sum = s.ac.createGain();
+  const ex = s.ac.createGain(), exF = s.ac.createBiquadFilter(); exF.type = 'lowpass'; exF.frequency.value = m.exciter; exF.Q.value = .7;
+  s.env(ex.gain, t0, { attack: .0005, release: m.burst, peak: 1 });
+  s.play(s.noise(`${s.key}:${key}`, .1), t0, t0 + .05).connect(exF).connect(ex);
+  m.modes.forEach(([ratio, amp, decay]) => {
+    const f = s.ac.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = f0 * ratio; f.Q.value = m.q;
+    const g = s.ac.createGain(); s.env(g.gain, t0, { attack: .001, release: decay, peak: level * amp * (m.q > 8 ? 2.5 : 1.2) });
+    ex.connect(f).connect(g).connect(sum);
+  });
+  const thud = s.ac.createGain(); s.env(thud.gain, t0, { attack: .001, release: .05, peak: level * .5 });
+  const o2 = s.osc('sine', f0 * .5, t0, t0 + .08); o2.frequency.exponentialRampToValueAtTime(f0 * .3, t0 + .05); o2.connect(thud).connect(sum);
+  s.place(sum, { pan: x === null ? pan : null, x, send, bus: 'fx' });
+}
+
+/** Paper: grains of ring-modulated noise. kind: slide | turn | flick | tear. */
+function rustle(s, at, o = {}) {
+  const { kind = 'slide', level = .07, dur = kind === 'flick' ? .06 : kind === 'turn' ? .3 : .5, pan = 0, x = null, send = .3, key = 'paper' } = o;
+  const rate = s.rate, n = Math.ceil(rate * (dur + .05)), b = s.ac.createBuffer(1, n, rate), d = b.getChannelData(0), r = rngFor(`${s.key}:${key}:${kind}:${at.toFixed(3)}`);
+  const densityAt = (u) => kind === 'tear' ? .6 + .4 * Math.cos(u * Math.PI * 2) : kind === 'turn' ? Math.sin(u * Math.PI) : kind === 'flick' ? (u < .3 ? 1 : 0) : .8 + .2 * Math.sin(u * 7);
+  const bandAt = (u) => kind === 'tear' ? lerp(6000, 2500, u) : kind === 'turn' ? lerp(1200, 4500, Math.sin(u * Math.PI)) : 3500;
+  for (let i = 0; i < n;) {
+    const u = i / (rate * dur), len = Math.floor(rate * (.002 + r() * .006)), f = bandAt(u) * (.6 + r() * .9), amp = densityAt(clamp(u, 0, 1)) * (r() < .75 ? 1 : 0);
+    for (let k = 0; k < len && i + k < n; k++) { const w = Math.sin(Math.PI * k / len); d[i + k] += amp * w * (r() * 2 - 1) * Math.sin(k / rate * f * 2 * Math.PI); }
+    i += Math.max(1, Math.floor(len * (kind === 'tear' ? .5 : .8)));
+  }
+  const g = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = kind === 'flick' ? 1500 : 700;
+  const body = s.ac.createBiquadFilter(); body.type = 'peaking'; body.frequency.value = 900; body.gain.value = kind === 'tear' ? 5 : 3; body.Q.value = 1;
+  s.env(g.gain, at, { attack: kind === 'flick' ? .001 : .02, hold: Math.max(0, dur - .08), release: .06, peak: level });
+  s.play(b, at, at + dur + .05).connect(f).connect(body).connect(g);
+  if (kind === 'flick') { const p = s.ac.createGain(); s.env(p.gain, at, { attack: .001, release: .02, peak: level * .6 }); s.osc('sine', 1500, at, at + .03).connect(p).connect(g); }
+  s.place(g, { pan: x === null ? pan : null, x, send, bus: 'fx' });
+}
+
+/** Riser into `hit`: pitch, cutoff and gain climb together, then stop for the accent to land. */
+function riser(s, hit, dur, o = {}) {
+  const { level = .06, from = 110, to = 880, pan = 0, send = .5, type = 'sawtooth', key = 'riser' } = o;
+  const t0 = hit - dur, g = s.ac.createGain(), f = s.ac.createBiquadFilter(); f.type = 'lowpass'; f.Q.value = 2;
+  f.frequency.setValueAtTime(from * 3, t0); f.frequency.exponentialRampToValueAtTime(to * 4, hit);
+  g.gain.setValueAtTime(TINY, t0); g.gain.exponentialRampToValueAtTime(level, hit - .02); g.gain.linearRampToValueAtTime(TINY, hit + .01);
+  const osc = s.osc(type, from, t0, hit); osc.frequency.exponentialRampToValueAtTime(to, hit); osc.connect(f).connect(g);
+  const n = s.ac.createGain(); n.gain.setValueAtTime(TINY, t0); n.gain.exponentialRampToValueAtTime(level * .6, hit - .02); n.gain.linearRampToValueAtTime(TINY, hit + .01);
+  s.play(s.noise(`${s.key}:${key}`, dur + .1, 'pink'), t0, hit).connect(f).connect(n);
+  s.place(g, { pan, send, bus: 'fx' }); s.place(n, { pan, send, bus: 'fx' });
+}
+
+/** Room tone across the whole film: what keeps a quiet picture from sounding like a dropout. */
+function air(s, o = {}) {
+  const { level = .012, key = 'air', highpass = 110, lowpass = 1800, rise = .8, fall = 1.2, from = 0, to = s.duration } = o;
+  const b = s.ac.createBuffer(2, Math.ceil(s.rate * Math.min(to - from, 12)), s.rate);
+  for (let ch = 0; ch < 2; ch++) { const d = b.getChannelData(ch), r = rngFor(`${s.key}:${key}:${ch}`); let low = 0; for (let i = 0; i < d.length; i++) { low = low * .982 + (r() * 2 - 1) * .018; d[i] = low * (.9 + .1 * Math.sin(i / s.rate * .39 + ch)); } }
+  const hp = s.ac.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = highpass; const lp = s.ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = lowpass;
+  const g = s.ac.createGain(); g.gain.setValueAtTime(TINY, from); g.gain.linearRampToValueAtTime(level, from + rise);
+  g.gain.setValueAtTime(level, Math.max(from + rise, to - fall)); g.gain.linearRampToValueAtTime(TINY, Math.min(to, s.duration));
+  s.play(b, from, to, { loop: true }).connect(hp).connect(lp).connect(g); s.place(g, { pan: 0, send: .3, bus: 'bed' });
+}
+
+/* ── end sound kit ────────────────────────────────────────────────────────── */
+
+/* ── emergence ────────────────────────────────────────────────────────────────
+   A question calls; the history of machines learning to listen answers. Nine
+   worlds run forward through time, the recollection runs back, and where the
+   two voices meet a thought branches into a network.                          */
+
+const WORLD_IDS=['neuron','valley','loom','hall','drop','forks','prism','orrery','web'];
+const YEAR={neuron:'1958',valley:'1986',loom:'2017',hall:'2020',drop:'2021',forks:'2022',prism:'2023',orrery:'2024',web:'2025'};
+function pathOf(pts,key,amp=2.2){return cut(pts,rngFor(key),{amp});}
+function discPath(x,y,r){const p=new Path2D();p.arc(x,y,Math.max(.01,r),0,TAU);return p;}
+function ellipsePath(x,y,rx,ry,rot=0){const p=new Path2D();p.ellipse(x,y,Math.max(.01,rx),Math.max(.01,ry),rot,0,TAU);return p;}
+function fillPaths(g,paths){g.fillStyle='#000';for(const p of paths)g.fill(p);}
+function unionPaths(paths){const p=new Path2D();for(const part of paths)p.addPath(part);return p;}
+function directInk(ctx,name,path,coverage=1,alpha=1,rule='nonzero'){
+  ctx.save();ctx.globalCompositeOperation='multiply';ctx.globalAlpha=alpha;ctx.translate(...REG[name]);
+  if(coverage>=1)ctx.fillStyle=INK[name];
+  else{
+    const sc=screenOf(name),q=clamp(Math.round(coverage*16),0,16);sc.colored=sc.colored||new Map();
+    if(!sc.colored.has(q)){
+      dotPattern(ctx,name,coverage);const tile=cv(sc.S,sc.S),g=tile.getContext('2d');
+      g.drawImage(sc.patterns.get(q),0,0);g.globalCompositeOperation='source-in';g.fillStyle=INK[name];g.fillRect(0,0,sc.S,sc.S);sc.colored.set(q,tile);
+    }
+    ctx.fillStyle=ctx.createPattern(sc.colored.get(q),'repeat');
+  }
+  ctx.fill(path,rule);ctx.restore();
+}
+function paperShape(ctx,path){ctx.save();ctx.clip(path);ctx.drawImage(paper,0,0);ctx.restore();}
+function arcPts(x,y,rx,ry,a,b,n=50){return Array.from({length:n},(_,i)=>{const q=lerp(a,b,i/(n-1));return[x+rx*Math.cos(q),y+ry*Math.sin(q)];});}
+function grainStars(g,rng,count,box=[0,0,W,W]){g.save();for(let i=0;i<count;i++){
+  const x=box[0]+rng()*box[2],y=box[1]+rng()*box[3],r=.5+rng()*1.6;
+  tone(g,.25+rng()*.7);g.beginPath();g.arc(x,y,r,0,TAU);g.fill();}g.restore();}
+const fract=x=>x-Math.floor(x);
+const smooth01=x=>{x=clamp(x,0,1);return x*x*(3-2*x);};
+/** Fade envelope for a recycled mark: zero value and slope at both ends of its cycle. */
+const life=(v,edge=.2)=>smooth01(v/edge)*smooth01((1-v)/edge);
+const gauss=(x,s)=>Math.exp(-x*x/(2*s*s));
+/** Point and heading at fraction u along a polyline, by arc length. */
+function pointAt(pts,u){
+  const L=[0];for(let i=1;i<pts.length;i++)L.push(L[i-1]+Math.hypot(pts[i][0]-pts[i-1][0],pts[i][1]-pts[i-1][1]));
+  const d=clamp(u,0,1)*L[L.length-1];let i=1;while(i<L.length-1&&L[i]<d)i++;
+  const v=(d-L[i-1])/((L[i]-L[i-1])||1);
+  return[lerp(pts[i-1][0],pts[i][0],v),lerp(pts[i-1][1],pts[i][1],v),Math.atan2(pts[i][1]-pts[i-1][1],pts[i][0]-pts[i-1][0])];
+}
+/** First fraction e of a dense polyline, interpolating the last segment. */
+function partial(pts,e){
+  const n=pts.length;if(e>=1)return pts;
+  const f=e*(n-1),m=Math.floor(f),v=f-m;
+  const out=pts.slice(0,m+1);
+  if(m<n-1)out.push([lerp(pts[m][0],pts[m+1][0],v),lerp(pts[m][1],pts[m+1][1],v)]);
+  return out;
+}
+
+/* A reusable single-line alphabet; curves are points, never browser fonts. */
+const glyphArc=(x,y,r,a,b,n=25)=>arcPts(x,y,r,r,a,b,n);
+const GLYPHS={
+  a:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.4],[.63,1]]]},
+  b:{w:.72,s:[[[.1,.05],[.1,1]],glyphArc(.35,.71,.28,-Math.PI*.5,Math.PI*1.5)]},
+  c:{w:.65,s:[glyphArc(.35,.7,.29,1.05,TAU-1.05)]},
+  d:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.04],[.63,1]]]},
+  e:{w:.65,s:[[[.08,.68],[.62,.68]],glyphArc(.35,.69,.28,-.1,-5.2)]},
+  f:{w:.46,s:[[[.16,1],[.16,.25],[.2,.08],[.43,.08]],[[.02,.4],[.43,.4]]]},
+  g:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.4],[.63,1.16],[.51,1.32],[.2,1.3]]]},
+  h:{w:.72,s:[[[.1,.05],[.1,1]],[[.1,.65],[.22,.42],[.46,.42],[.61,.57],[.61,1]]]},
+  i:{w:.3,s:[[[.15,.4],[.15,1]],[[.15,.17],[.15,.2]]]},
+  j:{w:.35,s:[[[.24,.4],[.24,1.2],[.12,1.3],[-.03,1.28]],[[.24,.17],[.24,.2]]]},
+  k:{w:.63,s:[[[.1,.04],[.1,1]],[[.59,.4],[.12,.72],[.61,1]]]},
+  l:{w:.3,s:[[[.15,.04],[.15,1]]]},
+  m:{w:1.01,s:[[[.08,1],[.08,.4],[.08,.65],[.22,.42],[.41,.43],[.49,.6],[.49,1]],[[.49,.65],[.64,.42],[.84,.43],[.93,.6],[.93,1]]]},
+  n:{w:.72,s:[[[.09,.4],[.09,1]],glyphArc(.35,.66,.26,Math.PI,TAU).concat([[.61,1]])]},
+  o:{w:.72,s:[glyphArc(.35,.7,.29,0,TAU)]},
+  p:{w:.72,s:[[[.1,1.3],[.1,.4]],glyphArc(.35,.68,.27,-Math.PI*.5,Math.PI*1.5)]},
+  q:{w:.72,s:[glyphArc(.35,.68,.27,0,TAU),[[.62,.4],[.62,1.3],[.78,1.15]]]},
+  r:{w:.5,s:[[[.1,1],[.1,.4],[.1,.68],[.25,.43],[.45,.44]]]},
+  s:{w:.62,s:[[[.56,.47],[.4,.4],[.22,.43],[.16,.55],[.3,.66],[.48,.75],[.54,.88],[.4,.98],[.2,.95],[.1,.9]]]},
+  t:{w:.47,s:[[[.19,.16],[.19,.84],[.25,.98],[.43,.93]],[[.03,.4],[.44,.4]]]},
+  u:{w:.72,s:[[[.09,.4],[.09,.72]].concat(glyphArc(.35,.72,.26,Math.PI,0)).concat([[.61,.4]]),[[.61,.62],[.61,1]]]},
+  v:{w:.68,s:[[[.05,.4],[.34,1],[.63,.4]]]},
+  w:{w:.99,s:[[[.05,.4],[.25,1],[.49,.55],[.74,1],[.94,.4]]]},
+  x:{w:.66,s:[[[.06,.4],[.6,1]],[[.6,.4],[.06,1]]]},
+  y:{w:.68,s:[[[.05,.4],[.34,1]],[[.63,.4],[.19,1.32],[.03,1.3]]]},
+  z:{w:.66,s:[[[.06,.4],[.6,.4],[.06,1],[.6,1]]]},
+  '0':{w:.73,s:[glyphArc(.36,.55,.36,0,TAU).map(([x,y])=>[x,(y-.55)*1.28+.55])]},
+  '1':{w:.5,s:[[[.05,.24],[.28,.06],[.28,1]],[[.07,1],[.47,1]]]},
+  '2':{w:.7,s:[[[.05,.24],[.2,.08],[.48,.09],[.62,.29],[.51,.48],[.05,1],[.65,1]]]},
+  '3':{w:.7,s:[[[.07,.09],[.62,.09],[.32,.49],[.55,.59],[.63,.81],[.43,1],[.12,.94]]]},
+  '4':{w:.7,s:[[[.5,.05],[.05,.72],[.67,.72]],[[.52,.05],[.52,1]]]},
+  '5':{w:.7,s:[[[.62,.09],[.12,.09],[.09,.51],[.43,.47],[.61,.61],[.6,.84],[.4,1],[.1,.92]]]},
+  '6':{w:.7,s:[[[.58,.09],[.3,.13],[.1,.5],[.1,.83],[.28,1],[.51,.94],[.63,.7],[.48,.51],[.12,.56]]]},
+  '7':{w:.7,s:[[[.05,.09],[.65,.09],[.25,1]]]},
+  '8':{w:.7,s:[glyphArc(.35,.28,.22,0,TAU),glyphArc(.35,.75,.26,0,TAU)]},
+  '9':{w:.7,s:[glyphArc(.35,.32,.26,0,TAU),[[.6,.32],[.55,.78],[.32,1],[.14,.94]]]},
+  ' ':{w:.38,s:[]},'.':{w:.3,s:[[[.15,.96],[.15,1]]]},'-':{w:.55,s:[[[.07,.7],[.48,.7]]]}
+};
+/* Connected italic for the title: entry stroke at the baseline, exit toward the next letter. */
+const SCRIPT={
+  e:{w:.59,s:[[[0,.84],[.36,.69],[.46,.49],[.34,.4],[.12,.6],[.1,.85],[.29,.98],[.55,.84]]]},
+  m:{w:.98,s:[[[0,.86],[.17,.45],[.14,.84],[.12,.95],[.35,.48],[.49,.5],[.48,.87],[.46,.95],[.68,.48],[.83,.51],[.81,.85],[.94,.95],[1.05,.83]]]},
+  n:{w:.69,s:[[[0,.86],[.14,.44],[.12,.87],[.1,.97],[.36,.47],[.5,.49],[.51,.84],[.63,.98],[.83,.89]]]},
+  r:{w:.52,s:[[[0,.86],[.14,.45],[.11,.78],[.09,.95],[.17,.66],[.31,.47],[.46,.43],[.44,.55],[.36,.6],[.42,.8],[.5,.97],[.66,.86]]]},
+  g:{w:.62,s:[[[0,.84],[.35,.67],[.46,.49],[.33,.41],[.12,.58],[.11,.84],[.29,.96],[.5,.8],[.55,.5],[.56,.86],[.55,1.12],[.42,1.31],[.22,1.24],[.28,1.06],[.52,.94],[.7,.85]]]},
+  c:{w:.55,s:[[[0,.86],[.09,.78],[.17,.66]],[[.47,.47],[.32,.4],[.13,.5],[.06,.7],[.11,.9],[.3,.99],[.56,.86]]]},
+};
+function letterStrokes(word,size,y,tracking=2,script=false,x){
+  const glyphs=script?SCRIPT:GLYPHS;
+  const width=[...word].reduce((w,ch)=>w+(glyphs[ch]?.w||.5)*size+tracking,0)-tracking;
+  let pen=x===undefined?540-width/2:x;const out=[];
+  for(const ch of word){const gl=glyphs[ch];if(!gl)continue;
+    for(const st of gl.s){const pts=st.map(([px,v])=>[pen+(px+(script?.1*(1-v):0))*size,y+v*size]);
+      out.push(script?curve(pts,false,9):pts);}
+    pen+=gl.w*size+tracking;
+  }return out;
+}
+function writeLetters(g,strokes,progress,width){
+  for(const pts of partialStrokes(strokes,progress))g.fill(nib(pts,wNib(pts,width,-.7,.26),{raw:true}));
+}
+function partialStrokes(strokes,progress){
+  const lengths=strokes.map(st=>st.slice(1).reduce((sum,p,i)=>sum+Math.hypot(p[0]-st[i][0],p[1]-st[i][1]),0));
+  let remaining=lengths.reduce((a,b)=>a+b,0)*clamp(progress,0,1);const result=[];
+  for(let j=0;j<strokes.length&&remaining>0;j++){
+    const st=strokes[j],pts=[st[0]];
+    for(let i=1;i<st.length&&remaining>0;i++){
+      const a=st[i-1],b=st[i],len=Math.hypot(b[0]-a[0],b[1]-a[1]);
+      const v=Math.min(1,remaining/(len||1));pts.push([lerp(a[0],b[0],v),lerp(a[1],b[1],v)]);remaining-=len;
+    }
+    if(pts.length>1)result.push(pts);
+  }return result;
+}
+/** A world's year, as a Path2D of drawn digits. Printed sunken or carved into a ground plate. */
+function yearPath(id,x,y,size=28){
+  return unionPaths(letterStrokes(YEAR[id],size,y,2,false,x).map(pts=>nib(pts,wNib(pts,size*.055,-.7,.3),{raw:true})));
+}
+
+/* ── branching ────────────────────────────────────────────────────────────────
+   One generator grows the neuron's dendrites and the release arbor: the
+   ending is the first world grown large. Branches carry their own spawn time
+   so growth can be replayed at any age; t0/dur are in seconds of growth.    */
+function arbor(key,x,y,o){
+  const rng=rngFor(key),out=[];
+  const grow=(x0,y0,ang,len,w,depth,t0)=>{
+    const n=6,raw=[[x0,y0]];let a=ang,px=x0,py=y0;const bend=(rng()-.5)*o.bend;
+    for(let i=1;i<=n;i++){a+=bend/n+(rng()-.5)*o.jitter;px+=Math.cos(a)*len/n;py+=Math.sin(a)*len/n;raw.push([px,py]);}
+    const pts=curve(raw,false,5),dur=o.dur*Math.pow(o.decay,depth);
+    const br={pts,w,depth,t0,dur,len};out.push(br);
+    if(depth<o.depth){
+      const kids=depth?o.kids:o.kids0;
+      for(let k=0;k<kids;k++){
+        const at=o.atMin+rng()*(o.atMax-o.atMin),[bx,by,ba]=pointAt(pts,at);
+        const side=(k+depth)%2?1:-1;
+        grow(bx,by,ba+side*(o.turn+rng()*o.turnVar),len*(o.shrink+rng()*.15),w*o.thin,depth+1,t0+at*dur);
+      }
+    }
+  };
+  for(let i=0;i<o.n0;i++){
+    const a=(o.a0||0)+i*TAU/o.n0+(rng()-.5)*(o.spread||0);
+    if(o.skip&&o.skip(a))continue;
+    grow(x,y,a,o.len*(.8+rng()*.4),o.w,0,(o.stagger||0)*rng());
+  }
+  return out;
+}
+/**
+ * Branch ribbons grown to `age` seconds (Infinity for complete), about (cx,cy) at `scale`.
+ * Returns [{path, thin, core, b, e, tip}] — three widths so a live pass can band them.
+ */
+function arborPaths(branches,age,scale=1,cx=540,cy=540,ease){
+  const out=[];
+  for(const b of branches){
+    const u=age===Infinity?1:phase(age,b.t0,b.dur);if(u<=0)continue;
+    const e=u>=1?1:(ease?ease(u):settle(u,{bounces:1,damp:5.5}));
+    const pts=partial(b.pts,e).map(([x,y])=>[cx+(x-540)*scale,cy+(y-540)*scale]);
+    if(pts.length<2)continue;
+    const w=b.w*scale*Math.min(1,e*1.5);
+    out.push({path:nib(pts,wTip(w),{raw:true}),thin:nib(pts,wTip(w*.6),{raw:true}),core:nib(pts,wTip(w*.3),{raw:true}),b,e,tip:pts[pts.length-1]});
+  }
+  return out;
+}
+
+/* ── worlds ─────────────────────────────────────────────────────────────────── */
+const angDist=(a,b)=>Math.abs((((a-b)%TAU)+TAU+Math.PI)%TAU-Math.PI);
+const strokeCarve=(g,path,w)=>{g.save();g.globalAlpha=1;g.globalCompositeOperation='destination-out';g.lineWidth=w;g.stroke(path);g.restore();};
+/** Straight-edged polygon with a hand waver: structural edges stay hard, but not ruled. */
+function handPoly(pts,rng,amp){const p=new Path2D();pts.forEach((a,i)=>{const b=pts[(i+1)%pts.length];for(let k=0;k<7;k++){const u=k/7,x=lerp(a[0],b[0],u)+(k?(rng()-.5)*amp*2:0),y=lerp(a[1],b[1],u)+(k?(rng()-.5)*amp*2:0);i||k?p.lineTo(x,y):p.moveTo(x,y);}});p.closePath();return p;}
+const segment=(pts,u0,u1,n=8)=>Array.from({length:n},(_,i)=>pointAt(pts,lerp(u0,u1,i/(n-1))).slice(0,2));
+
+/* 1958 · neuron. The dot is the nucleolus; a pulse travels the axon. */
+const AXON=curve([[540,540],[634,596],[748,676],[884,748],[1030,832],[1180,930]],false,12);
+const NEURON_ARBOR=arbor('neuron:arbor',540,540,{n0:8,len:340,w:15,depth:2,kids0:2,kids:2,bend:1.6,jitter:.42,turn:.8,turnVar:.4,
+  shrink:.55,thin:.55,atMin:.35,atMax:.8,dur:1,decay:1,spread:.45,a0:.2,skip:a=>angDist(a,.6)<.62});
+const FAR_ARBOR=arbor('neuron:far',1020,96,{n0:6,len:170,w:7,depth:2,kids0:2,kids:1,bend:1,jitter:.3,turn:.8,turnVar:.4,
+  shrink:.55,thin:.55,atMin:.35,atMax:.8,dur:1,decay:1,spread:.4});
+const FAR2_ARBOR=arbor('neuron:far2',70,760,{n0:5,len:120,w:5,depth:1,kids0:2,kids:1,bend:1,jitter:.3,turn:.8,turnVar:.4,
+  shrink:.55,thin:.55,atMin:.35,atMax:.8,dur:1,decay:1,spread:.4});
+const NEURON_TIPS=NEURON_ARBOR.filter(b=>b.depth===2).map(b=>b.pts[b.pts.length-1]);
+scene('neuron',{
+  inks:['violet','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const soma=pathOf(ringPts(540,540,108,96,12,.35),'neuron:soma',5);
+    const dendrites=unionPaths(arborPaths(NEURON_ARBOR,Infinity).map(p=>p.path));
+    const axon=nib(AXON,u=>7.5-3.5*u,{raw:true});
+    const beads=unionPaths([.2,.36,.52,.68,.85].map(u=>{const [x,y,a]=pointAt(AXON,u);return ellipsePath(x,y,38,11,a);}));
+    if(ink==='violet'){
+      for(const [arb,a,sx,sy,r] of [[FAR_ARBOR,.3,1020,96,44],[FAR2_ARBOR,.18,70,760,28]]){
+        print(g,unionPaths(arborPaths(arb,Infinity).map(p=>p.path)),a);
+        plane(g,pathOf(ringPts(sx,sy,r,r*.88,10,.2),'neuron:farsoma'+sx,3),a+.02);
+      }
+      print(g,dendrites,.72);print(g,axon,.7);print(g,beads,.86);
+      plane(g,soma,.64);
+      shade(g,soma,{x:500,y:498,r0:0,r:125,cut:true,stops:[[0,.6],[.45,.22],[1,0]]});
+      print(g,yearPath('neuron',300,1006),.55);
+    }
+    if(ink==='indigo'){
+      shade(g,soma,{x0:480,y0:480,x1:625,y1:625,stops:[[0,0],[.5,0],[1,.55]]});
+      shade(g,dendrites,{x:540,y:540,r0:75,r:230,stops:[[0,.62],[1,0]]});
+      shade(g,axon,{x:540,y:540,r0:75,r:260,stops:[[0,.6],[1,0]]});
+      print(g,discPath(540,540,35),.92);carve(g,discPath(540,540,19));
+    }
+    if(ink==='orange'){
+      NEURON_TIPS.forEach((p,i)=>{if(i%2===0)print(g,discPath(p[0],p[1],3.6),.85);});
+    }
+  },
+  live(ctx,s){
+    const v=fract(s*.5),a=life(v,.14);
+    if(a>.01){
+      const dash=nib(segment(AXON,Math.max(0,v-.06),v),wSwell(5.5,.6,.5),{raw:true});
+      paperShape(ctx,dash);directInk(ctx,'orange',dash,1,a);
+    }
+    const glints=[];
+    NEURON_TIPS.forEach((p,i)=>{if(i%2)return;const f=Math.pow(Math.max(0,Math.sin(TAU*(s*.5+i*.13))),8);
+      if(f>.05)glints.push(discPath(p[0],p[1],3+4*f));});
+    if(glints.length){const u=unionPaths(glints);paperShape(ctx,u);directInk(ctx,'yellow',u,1,.9);}
+  }
+});
+
+/* 1986 · valley. A loss landscape; the dot is the minimum a ball settles into. */
+const bowlF=u=>557-1500*(u-.5)*(u-.5);
+const bowlWob=makeWob(rngFor('valley:bowl'),4);
+const bowlY=u=>bowlF(u)+bowlWob(u*3)*18;
+scene('valley',{
+  inks:['blue','green','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const far=ridge(peaksAt(580,{rng:sr,amp:260,n:6}));
+    const near=ridge(bowlY);
+    const fore=ridge(ridgeAt(960,{rng:sr,amp:48,freq:2,harm:3}));
+    const contours=[];for(let k=1;k<=7;k++)contours.push(ridge(u=>bowlF(u)+k*46+bowlWob(u*3+k*.7)*9));
+    if(ink==='blue'){
+      shade(g,null,{x0:0,y0:0,x1:0,y1:430,stops:[[0,.32],[1,0]]});
+      print(g,far,.44);
+      shade(g,far,{x0:0,y0:400,x1:0,y1:600,cut:true,stops:[[0,0],[.6,.15],[1,.8]]});
+      carve(g,near);carve(g,fore);
+    }
+    if(ink==='green'){
+      plane(g,near,.66);
+      for(const c of contours)strokeCarve(g,c,1.7);
+      shade(g,near,{x0:0,y0:0,x1:1080,y1:0,cut:true,stops:[[0,.42],[.62,0],[1,0]]});
+      carve(g,yearPath('valley',150,838,26));
+      plane(g,fore,.9);
+    }
+    if(ink==='indigo'){
+      hatch(g,near,rng,{ang:-.3,gap:8,w:1.5,a:.5,fade:u=>clamp((u-.58)/.3,0,1)});
+      print(g,fore,.78);
+    }
+  },
+  live(ctx,s){
+    const u=phase(s,.05,.95),e=settle(u,{bounces:2,damp:3});
+    const xu=lerp(ridgeU(30),.5,e),x=-60+xu*(W+120),y=bowlY(xu)-17;
+    const ball=discPath(x,y,17);
+    inkPass(ctx,'indigo',{alpha:.45},g=>{g.fill(ellipsePath(x+3,y+15,17,5));});
+    paperShape(ctx,ball);
+    bandPass(ctx,'orange',{},[{coverage:.95,path:ball},{coverage:.55,path:discPath(x-5,y-5,10)},{coverage:0,path:discPath(x-6.5,y-6.5,4.2)}]);
+  }
+});
+
+/* 2017 · loom. Attention as a weave; the dot is the query knot. */
+const LOOM_N=13,loomX=i=>90+i*75;
+const LOOM_SPIKES=new Set(Array.from({length:9},(_,k)=>{const r=rngFor('loom:spike'+k);return Math.floor(r()*LOOM_N)+'-'+Math.floor(r()*LOOM_N);}));
+const attention=(i,j)=>{if(i===6&&j===6)return 1;const d=Math.abs(i-j);let w=.8*Math.exp(-d*d/2.6)+.06;if(LOOM_SPIKES.has(i+'-'+j))w=Math.max(w,.72);return w;};
+function threadPath(i,vertical,sr,hw){
+  const c=loomX(i),raw=[];
+  for(let k=0;k<6;k++){const along=lerp(-60,1140,k/5),off=k===0||k===5?0:(sr()-.5)*7;raw.push(vertical?[c+off,along]:[along,c+off]);}
+  return nib(raw,()=>hw,{per:8});
+}
+scene('loom',{
+  inks:['blue','violet','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const warp=[],weft=[];
+    for(let i=0;i<LOOM_N;i++)warp.push(threadPath(i,true,sr,4.6));
+    for(let j=0;j<LOOM_N;j++)weft.push(threadPath(j,false,sr,4.6));
+    if(ink==='blue'){
+      print(g,unionPaths(warp.filter((_,i)=>i!==6)),.68);
+      plane(g,unionPaths(weft),.6);
+      for(let i=0;i<LOOM_N;i++)for(let j=0;j<LOOM_N;j++){
+        if((i+j)%2||i===6)continue;const p=new Path2D();p.rect(loomX(i)-5.2,loomX(j)-6.4,10.4,12.8);plane(g,p,.68);
+      }
+      carve(g,warp[6]);
+      shade(g,null,{x0:0,y0:0,x1:0,y1:560,cut:true,stops:[[0,.5],[1,0]]});
+      print(g,yearPath('loom',34,1034,24),.55);
+    }
+    if(ink==='violet'){
+      const knots=[];
+      for(let i=0;i<LOOM_N;i++)for(let j=0;j<LOOM_N;j++){const w=attention(i,j);if(w<.14||(i===6&&j===6))continue;
+        knots.push(pathOf(ringPts(loomX(i),loomX(j),3+15*w,3+15*w,8,i*.7),'loom:knot'+i+'-'+j,1.2));}
+      print(g,unionPaths(knots),.92);
+      print(g,discPath(540,540,22),.9);carve(g,discPath(540,540,15.5));
+    }
+    if(ink==='indigo'){
+      hatch(g,null,rng,{ang:-.2,gap:7,w:1.6,a:.55,fade:u=>clamp((u-.62)/.3,0,1)});
+      const heavy=[];
+      for(let i=0;i<LOOM_N;i++)for(let j=0;j<LOOM_N;j++){const w=attention(i,j);if(w<.55||(i===6&&j===6))continue;
+        heavy.push(pathOf(ringPts(loomX(i),loomX(j),3+15*w,3+15*w,8,i*.7),'loom:knot'+i+'-'+j,1.2));}
+      print(g,unionPaths(heavy),.55);
+      print(g,discPath(540,540,22),.85);carve(g,discPath(540,540,15.5));
+    }
+    if(ink==='orange')print(g,warp[6],.78);
+  },
+  live(ctx,s){
+    const step=s*4,j=Math.floor(step)%LOOM_N,p=fract(step),y=loomX(j),xs=lerp(50,1030,p);
+    const row=new Path2D();row.rect(50,y-5.2,xs-50,10.4);
+    const prev=(j+LOOM_N-1)%LOOM_N,rowPrev=new Path2D();rowPrev.rect(50,loomX(prev)-5.2,980,10.4);
+    const flash=[];for(let i=0;i<LOOM_N;i++){if(loomX(i)>xs||i===6)continue;const w=attention(i,j);if(w<.14)continue;flash.push(discPath(loomX(i),y,3+15*w));}
+    const lit=unionPaths([row,rowPrev].concat(flash));
+    paperShape(ctx,lit);
+    directInk(ctx,'orange',rowPrev,1,.35);directInk(ctx,'orange',row,1,.9);
+    if(flash.length)directInk(ctx,'orange',unionPaths(flash),1,.95);
+    const shuttle=pathOf([[xs-26,y],[xs-8,y-9],[xs+22,y],[xs-8,y+9]],'loom:shuttle',1);
+    paperShape(ctx,shuttle);directInk(ctx,'violet',shuttle);directInk(ctx,'indigo',shuttle,1,.6);
+  }
+});
+
+
+/* 2020 · hall. Scale: a data hall in one-point perspective; the dot is the vanishing point. */
+const HALL={xl:z=>lerp(150,540,z),xr:z=>lerp(930,540,z),yf:z=>lerp(1080,540,z),yc:z=>lerp(0,540,z)};
+const HALL_Z=Array.from({length:10},(_,k)=>1-Math.pow(.76,k));
+function rackFace(side,z0,z1){
+  const X=side<0?HALL.xl:HALL.xr,top=z=>lerp(HALL.yc(z),HALL.yf(z),.09);
+  const p=new Path2D();p.moveTo(X(z0),top(z0));p.lineTo(X(z1),top(z1));p.lineTo(X(z1),HALL.yf(z1));p.lineTo(X(z0),HALL.yf(z0));p.closePath();
+  return p;
+}
+const HALL_RACKS=(()=>{const out=[];for(let k=0;k<HALL_Z.length-1;k++){const z0=HALL_Z[k]+.008,z1=HALL_Z[k+1]-.012;
+  for(const side of [-1,1])out.push({side,z0,z1,zm:(z0+z1)/2,face:rackFace(side,z0,z1)});}return out;})();
+const HALL_LEDS=(()=>{const out=[];HALL_RACKS.forEach((r,ri)=>{
+  const X=r.side<0?HALL.xl:HALL.xr,cols=Math.max(2,Math.round(6*(1-r.zm)));
+  for(let c=0;c<cols;c++)for(let row=0;row<5;row++){
+    const z=lerp(r.z0,r.z1,(c+.5)/cols),h=.28+row*.11,y=lerp(lerp(HALL.yc(z),HALL.yf(z),.09),HALL.yf(z),h);
+    out.push({x:X(z),y,r:lerp(3.4,.9,Math.pow(z,.8)),id:ri*40+c*5+row});
+  }});return out;})();
+scene('hall',{
+  inks:['blue','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const ceiling=new Path2D();ceiling.moveTo(-10,-10);ceiling.lineTo(1090,-10);ceiling.lineTo(540,540);ceiling.closePath();
+    const floor=new Path2D();floor.moveTo(-10,1090);floor.lineTo(1090,1090);floor.lineTo(540,540);floor.closePath();
+    const walls=new Path2D();walls.moveTo(-10,-10);walls.lineTo(540,540);walls.lineTo(-10,1090);walls.closePath();walls.moveTo(1090,-10);walls.lineTo(540,540);walls.lineTo(1090,1090);walls.closePath();
+    const lights=unionPaths([.08,.24,.4,.54,.66,.76].map(z=>{const y=HALL.yc(z),hw=118*(1-z),p=new Path2D();p.rect(540-hw,y-4*(1-z)-2,hw*2,8*(1-z)+3);return p;}));
+    const leds=unionPaths(HALL_LEDS.map(l=>discPath(l.x,l.y,l.r)));
+    if(ink==='blue'){
+      print(g,walls,.34);print(g,ceiling,.3);print(g,floor,.36);
+      g.save();g.globalCompositeOperation='destination-out';g.lineWidth=2;
+      for(let k=0;k<=8;k++){g.beginPath();g.moveTo(540,540);g.lineTo(150+k*97.5,1080);g.stroke();g.beginPath();g.moveTo(540,540);g.lineTo(150+k*97.5,0);g.stroke();}
+      for(const z of HALL_Z.slice(1)){g.beginPath();g.moveTo(HALL.xl(z),HALL.yf(z));g.lineTo(HALL.xr(z),HALL.yf(z));g.stroke();}
+      g.restore();
+      for(const r of [...HALL_RACKS].reverse()){plane(g,r.face,lerp(.88,.26,Math.pow(r.zm,.7)));
+        const X=r.side<0?HALL.xl:HALL.xr;g.save();g.globalCompositeOperation='destination-out';g.lineWidth=lerp(2.2,.8,r.zm);
+        for(let s=0;s<7;s++){const h=.12+s*.125;g.beginPath();g.moveTo(X(r.z0),lerp(lerp(HALL.yc(r.z0),HALL.yf(r.z0),.09),HALL.yf(r.z0),h));g.lineTo(X(r.z1),lerp(lerp(HALL.yc(r.z1),HALL.yf(r.z1),.09),HALL.yf(r.z1),h));g.stroke();}
+        g.restore();}
+      shade(g,null,{x:540,y:540,r0:0,r:200,cut:true,stops:[[0,1],[.4,.6],[1,0]]});
+      carve(g,lights);carve(g,leds);
+      print(g,yearPath('hall',118,1002,26),.7);
+    }
+    if(ink==='indigo'){
+      print(g,ceiling,.62);print(g,walls,.5);
+      shade(g,ceiling,{x0:0,y0:0,x1:0,y1:540,cut:true,stops:[[0,0],[1,.9]]});
+      g.save();g.clip(ceiling);g.globalCompositeOperation='destination-out';g.lineWidth=1.6;for(let k=0;k<=8;k++){g.beginPath();g.moveTo(540,540);g.lineTo(150+k*97.5,0);g.stroke();}g.restore();
+      for(const r of [...HALL_RACKS].reverse()){const a=lerp(.85,0,clamp(r.zm/.62,0,1));if(a>.02)plane(g,r.face,a);else carve(g,r.face);}
+      shade(g,null,{x:540,y:540,r0:0,r:230,cut:true,stops:[[0,1],[.5,.7],[1,0]]});
+      carve(g,lights);carve(g,leds);
+    }
+    if(ink==='orange')print(g,leds,.9);
+  },
+  live(ctx,s){
+    const step=Math.floor(s*6),on=[];
+    for(const l of HALL_LEDS){if(rngFor('led'+l.id+':'+step)()<.22)on.push(discPath(l.x,l.y,l.r*1.25));}
+    if(!on.length)return;const u=unionPaths(on);paperShape(ctx,u);directInk(ctx,'yellow',u,1,.95);
+  }
+});
+
+/* 2021 · drop. Diffusion: an ink drop meets water; the dot is the point of impact. */
+const DROP_TENDRILS=(()=>{const rng=rngFor('drop:tendrils'),out=[];
+  for(let i=0;i<7;i++){const x0=540+(i-3)*44+(rng()-.5)*26,pts=[[x0,640]];let x=x0,y=640,drift=(i-3)*11+(rng()-.5)*26;
+    const n=4+Math.floor(rng()*4);
+    for(let k=1;k<=n;k++){y+=52+rng()*34;x+=drift*(.5+rng()*.9)+(rng()-.5)*40;drift*=.9;pts.push([x,y]);}
+    out.push({pts:curve(pts,false,10),w:lerp(20,9,rng())});}
+  return out;})();
+scene('drop',{
+  inks:['violet','blue','indigo'],
+  plates(g,ink,rng,sr){
+    const cap=unionPaths([pathOf(ringPts(540,598,158,58,12,0),'drop:cap',6),
+      pathOf(ringPts(470,626,70,44,10,.3),'drop:cap2',5),pathOf(ringPts(618,630,74,46,10,-.2),'drop:cap3',5),
+      pathOf(ringPts(540,652,92,40,10,0),'drop:cap4',5)]);
+    const tendrils=unionPaths(DROP_TENDRILS.map(t=>nib(t.pts,wSwell(t.w,.15,.62),{raw:true})));
+    const crown=unionPaths([[-.55,84],[-.2,118],[.18,126],[.5,92]].map(([dx,h],i)=>nib([[540+dx*40,540],[540+dx*70,540-h*.6],[540+dx*88,540-h]],wTip(4.5-i%2))));
+    const droplets=unionPaths([[522,392,5],[566,430,4],[500,470,3.2],[583,352,3]].map(([x,y,r])=>pathOf(ringPts(x,y,r,r*1.3,8,0),'drop:d'+x,1)));
+    if(ink==='violet'){
+      print(g,tendrils,.74);
+      shade(g,tendrils,{x0:0,y0:640,x1:0,y1:1040,cut:true,stops:[[0,0],[.5,.25],[1,.85]]});
+      spray(g,null,rng,{n:2600,r0:.7,r1:2.4,a:.7,box:[260,620,560,460],density:(x,y)=>{
+        let best=1e9;for(const t of DROP_TENDRILS)for(let i=0;i<t.pts.length;i+=3){const d=Math.hypot(t.pts[i][0]-x,t.pts[i][1]-y);if(d<best)best=d;}
+        const fall=clamp((y-660)/380,0,1);return clamp(1-(best-14)/(30+40*fall),0,1)*(.25+.75*fall);}});
+      plane(g,cap,.88);
+      shade(g,cap,{x:540,y:556,r0:0,r:120,cut:true,stops:[[0,.55],[.4,.2],[1,0]]});
+      carve(g,discPath(540,540,17));
+      print(g,crown,.85);print(g,droplets,.85);
+      print(g,yearPath('drop',930,1034,24),.55);
+    }
+    if(ink==='blue'){
+      shade(g,null,{x0:0,y0:540,x1:0,y1:1080,stops:[[0,.05],[.3,.1],[1,.32]]});
+      hatch(g,null,rng,{ang:0,gap:9,w:1.4,a:.5,fade:u=>clamp((u-.66)/.3,0,1)});
+      const surface=nib(Array.from({length:9},(_,i)=>[-60+i*150,540+(sr()-.5)*5]),()=>1.7,{per:8});
+      print(g,surface,.85);
+      keyline(g,ellipsePath(540,540,66,9),2,.75);keyline(g,ellipsePath(540,540,128,17),1.5,.5);keyline(g,ellipsePath(540,540,196,25),1.1,.3);
+      carve(g,cap);carve(g,crown);carve(g,discPath(540,540,17));
+    }
+    if(ink==='indigo'){
+      shade(g,cap,{x0:0,y0:560,x1:0,y1:690,stops:[[0,0],[.35,.2],[1,.85]]});
+      shade(g,tendrils,{x0:0,y0:640,x1:0,y1:800,stops:[[0,.6],[1,0]]});
+    }
+  },
+  live(ctx,s){
+    inkPass(ctx,'blue',{alpha:.5},g=>{
+      DROP_TENDRILS.forEach((t,i)=>{const tip=t.pts[t.pts.length-1],pts=[tip];
+        for(let k=1;k<=5;k++)pts.push([tip[0]+wander('fil'+i+'x'+k,.23)(s)*22*k/5*(1+k*.2),tip[1]+k*26+wander('fil'+i+'y'+k,.19)(s)*8]);
+        g.fill(nib(pts,wTip(1.5)));});
+    });
+    inkPass(ctx,'blue',{alpha:.7},g=>{g.lineWidth=1.1;
+      for(let i=0;i<7;i++){const r=rngFor('bubble'+i),off=r(),x0=380+r()*320,v=fract(s*.2+off),a=life(v,.15);if(a<.02)continue;
+        const y=1000-v*430,x=x0+wander('bub'+i,.35)(s)*16;g.globalAlpha=a;g.beginPath();g.arc(x,y,2.6+r()*3,0,TAU);g.stroke();}
+      const v=fract(s),rx=24+230*easeOutQuad(v);g.globalAlpha=(1-v)*.6;g.lineWidth=1.6;g.beginPath();g.ellipse(540,540,rx,rx*.13,0,0,TAU);g.stroke();
+    });
+  }
+});
+
+/* 2022 · forks. Alignment as sympathetic resonance; the dot is the fork's node. */
+function forkParts(x,y,k){
+  const T=([px,py])=>[x+(px-540)*k,y+(py-540)*k];
+  const left=[[540,540],[514,506],[501,445],[497,300],[498,60]],right=left.map(([px,py])=>[1080-px,py]);
+  return{left:left.map(T),right:right.map(T),stem:[[540,556],[540,700],[540,1160]].map(T),k};
+}
+const FORK_BIG=forkParts(540,540,1),FORK_SMALL=forkParts(178,232,.38);
+function forkPaths(f,dx=0){
+  const shift=(pts,d)=>pts.map(([px,py],i)=>[px+d*Math.pow(i/(pts.length-1),1.6),py]);
+  const w=u=>f.k*(14.5-3*u);
+  return{left:nib(shift(f.left,-dx),w),right:nib(shift(f.right,dx),w),stem:nib(f.stem,()=>f.k*16),
+    yoke:discPath(f.left[0][0],f.left[0][1],f.k*33)};
+}
+scene('forks',{
+  inks:['blue','violet','indigo'],
+  plates(g,ink,rng,sr){
+    const big=forkPaths(FORK_BIG),small=forkPaths(FORK_SMALL);
+    const box=pathOf([[302,896],[302,896],[778,890],[778,890],[784,1130],[784,1130],[296,1134],[296,1134]],'forks:box',2);
+    const lid=pathOf([[302,896],[302,896],[778,890],[778,890],[742,858],[742,858],[338,862],[338,862]],'forks:lid',2);
+    const hole=discPath(656,992,34),year=yearPath('forks',372,1004,26);
+    if(ink==='blue'){
+      for(const [f,a] of [[small,.52],[big,.74]]){
+        const steel=unionPaths([f.left,f.right,f.stem,f.yoke]);plane(g,steel,a);
+      }
+      for(const [f,d] of [[FORK_BIG,1],[FORK_SMALL,.38]]){
+        for(const arm of [f.left,f.right]){const sign=arm===f.left?-1:1;
+          carve(g,nib(arm.map(([px,py])=>[px+sign*-1*d*5.5,py]),()=>d*2.4));}
+        carve(g,nib(f.stem.map(([px,py])=>[px-d*5.5,py]),()=>d*2.6));
+      }
+      print(g,box,.5);hatch(g,box,rng,{ang:-.4,gap:7,w:1.5,a:.45});
+      carve(g,lid);print(g,lid,.28);strokeCarve(g,hole,3);carve(g,year);
+    }
+    if(ink==='violet'){
+      for(const [f,d,a] of [[FORK_BIG,1,.55],[FORK_SMALL,.38,.4]]){
+        const p=forkPaths(f);
+        for(const [arm,path] of [[f.left,p.left],[f.right,p.right]]){const sign=arm===f.left?-1:1;
+          shade(g,path,{x0:arm[2][0]-sign*11*d,y0:0,x1:arm[2][0]+sign*11*d,y1:0,stops:[[0,0],[.5,0],[1,a]]});}
+        shade(g,p.stem,{x0:f.stem[0][0]-15*d,y0:0,x1:f.stem[0][0]+15*d,y1:0,stops:[[0,0],[.45,0],[1,a]]});
+        shade(g,p.yoke,{x:f.left[0][0]+8*d,y:f.left[0][1]+8*d,r0:0,r:30*d,stops:[[0,a],[1,0]]});
+      }
+      print(g,box,.88);carve(g,lid);print(g,lid,.4);strokeCarve(g,hole,3);carve(g,year);
+    }
+    if(ink==='indigo'){
+      print(g,box,.55);shade(g,box,{x0:0,y0:900,x1:0,y1:1080,cut:true,stops:[[0,.7],[1,0]]});
+      carve(g,lid);print(g,hole,.9);strokeCarve(g,hole,3);carve(g,year);
+      bed(g,540,905,150,14,rng,.6);
+    }
+  },
+  live(ctx,s){
+    const amp=7*(1-.35*phase(s,0,1.8)),d=amp*Math.sin(TAU*5*s);
+    const amp2=4.2*phase(s,.35,1.1),d2=amp2*Math.sin(TAU*5*s+.9);
+    inkPass(ctx,'blue',{alpha:.42},g=>{g.lineWidth=2;
+      for(const [f,dd] of [[FORK_BIG,d],[FORK_SMALL,d2]]){if(Math.abs(dd)<.3)continue;const p=forkPaths(f,dd);g.stroke(p.left);g.stroke(p.right);}
+    });
+    inkPass(ctx,'blue',{alpha:.75},g=>{
+      for(const [f,a0] of [[FORK_BIG,1],[FORK_SMALL,phase(s,.5,1)]]){if(a0<=0)continue;
+        for(const arm of [f.left,f.right]){const [tx,ty]=arm[arm.length-1];
+          for(let k=0;k<2;k++){const v=fract(s*2+k*.5),r=8*f.k+52*f.k*easeOutQuad(v);g.globalAlpha=(1-v)*.8*a0;g.lineWidth=2.2*(1-v)+.4;
+            const dir=arm===f.left?Math.PI:0;g.beginPath();g.arc(tx,ty,r,dir-.75,dir+.75);g.stroke();}}
+      }
+    });
+  }
+});
+
+/* 2023 · prism. Interpretability: white light through a prism becomes features; the dot is the refraction point. */
+const PRISM_FAN=[-.31,-.19,-.07,.06,.19,.33];
+function wedge(a0,a1,r=820){const p=new Path2D();p.moveTo(540,540);p.lineTo(540+Math.cos(a0)*r,540+Math.sin(a0)*r);p.lineTo(540+Math.cos(a1)*r,540+Math.sin(a1)*r);p.closePath();return p;}
+const PRISM_BANDS=PRISM_FAN.slice(0,-1).map((a,i)=>wedge(a,PRISM_FAN[i+1]));
+scene('prism',{
+  inks:['indigo','violet','yellow','orange'],
+  plates(g,ink,rng,sr){
+    const prism=handPoly([[540,286],[326,724],[754,724]],sr,1.6);
+    const beam=nib([[-60,462],[200,490],[540,540]],u=>7+4*u);
+    const [paperBand,yellowBand,orangeBand,violetBand,indigoBand]=PRISM_BANDS;
+    if(ink==='indigo'||ink==='violet'){
+      tone(g,ink==='indigo'?.9:.8);g.fillRect(0,0,W,W);
+      g.save();g.globalCompositeOperation='destination-out';grainStars(g,rngFor('prism:stars'),340);g.restore();
+      if(ink==='indigo'){carve(g,prism);carve(g,violetBand);}
+      else{
+        shade(g,prism,{x:540,y:540,r0:0,r:250,cut:true,stops:[[0,.75],[.5,.3],[1,0]]});
+        carve(g,nib([[536,300],[420,540],[340,704]],()=>3.2));
+        carve(g,indigoBand);
+      }
+      carve(g,beam);carve(g,paperBand);carve(g,yellowBand);carve(g,orangeBand);
+      carve(g,yearPath('prism',60,1010,26));
+    }
+    if(ink==='yellow'){print(g,yellowBand,.92);shade(g,beam,{x0:-60,y0:0,x1:540,y1:0,stops:[[0,0],[1,.35]]});}
+    if(ink==='orange')print(g,orangeBand,.9);
+  },
+  live(ctx,s){
+    const inks=['violet','orange','indigo','yellow','orange'];
+    PRISM_BANDS.forEach((band,b)=>{
+      const a=(PRISM_FAN[b]+PRISM_FAN[b+1])/2,marks=[];
+      for(let k=0;k<3;k++){const r=rngFor('feat:'+b+':'+k),v=fract(s*.3+r()*1),life_=life(v,.1);if(life_<.03)continue;
+        const d=120+v*760,x=540+Math.cos(a)*d+(r()-.5)*24,y=540+Math.sin(a)*d+(r()-.5)*24;
+        marks.push(featurePath(x,y,r()*TAU+s*.4,11+r()*6,(b+k)%4,'pf'+b+k));}
+      if(!marks.length)return;const u=unionPaths(marks);
+      ctx.save();ctx.globalAlpha=1;paperShape(ctx,u);ctx.restore();
+      directInk(ctx,inks[b],u,1,.9,'evenodd');
+    });
+  }
+});
+
+/* 2024 · orrery. Agents: a clockwork of orbits; the dot is the sun. */
+const ORBITS=[{r:135,size:9,hz:1.35,ph:.6},{r:225,size:13,hz:.82,ph:2.4},{r:320,size:17,hz:.5,ph:4.2,moon:true},{r:430,size:12,hz:.31,ph:1.2}];
+const orbitPos=(o,s)=>{const a=o.ph+s*o.hz;return[540+Math.cos(a)*o.r,540+Math.sin(a)*o.r*.42,a];};
+scene('orrery',{
+  inks:['blue','violet','yellow','orange'],
+  plates(g,ink,rng,sr){
+    const plinth=pathOf([[298,878],[782,874],[790,1120],[292,1124]],'orrery:plinth',3);
+    const cap=pathOf([[298,878],[782,874],[786,902],[296,906]],'orrery:cap',2);
+    const pillar=nib([[540,566],[540,720],[540,900]],u=>9+7*u);
+    const table=ellipsePath(540,560,480,205);
+    if(ink==='blue'){
+      print(g,table,.14);
+      for(const o of ORBITS){
+        const back=new Path2D();back.ellipse(540,540,o.r,o.r*.42,0,Math.PI,TAU);keyline(g,back,3,.42);
+        const front=new Path2D();front.ellipse(540,540,o.r,o.r*.42,0,0,Math.PI);keyline(g,front,3.4,.85);
+      }
+      print(g,pillar,.5);print(g,plinth,.55);hatch(g,plinth,rng,{ang:-.5,gap:8,w:1.6,a:.4});carve(g,cap);
+    }
+    if(ink==='violet'){
+      print(g,pillar,.82);shade(g,pillar,{x0:524,y0:0,x1:556,y1:0,cut:true,stops:[[0,.5],[.4,0],[1,0]]});
+      print(g,plinth,.9);carve(g,cap);print(g,cap,.42);
+      shade(g,plinth,{x0:0,y0:880,x1:0,y1:1080,cut:true,stops:[[0,.5],[.5,.1],[1,0]]});
+      carve(g,yearPath('orrery',392,982,26));
+    }
+    if(ink==='yellow')print(g,discPath(540,540,31),.95);
+    if(ink==='orange'){print(g,discPath(540,540,39),.62);carve(g,discPath(540,540,30));}
+  },
+  live(ctx,s){
+    inkPass(ctx,'blue',{alpha:.8},g=>{
+      for(const o of ORBITS){const [x,y,a]=orbitPos(o,s),dx=x-540,dy=y-540,L=Math.hypot(dx,dy),ux=dx/L,uy=dy/L;
+        g.fill(nib([[540+ux*38,540+uy*38],[x-ux*o.size,y-uy*o.size]],()=>1.6));}
+    });
+    ORBITS.forEach((o,i)=>{const [x,y,a]=orbitPos(o,s);
+      const body=discPath(x,y,o.size);paperShape(ctx,body);directInk(ctx,'violet',body);
+      paperShape(ctx,discPath(x-o.size*.36,y-o.size*.36,o.size*.3));
+      if(o.moon){const ma=s*3.1+1,mx=x+Math.cos(ma)*30,my=y+Math.sin(ma)*13;const m=discPath(mx,my,4);paperShape(ctx,m);directInk(ctx,'violet',m);}
+    });
+  }
+});
+
+/* 2025 · web. Safety as a net that feels every touch; the dot is the hub. */
+function leafPath(x,y,ang,len,width,key){
+  const ca=Math.cos(ang),sa=Math.sin(ang),T=(u,v)=>[x+u*ca-v*sa,y+u*sa+v*ca];
+  return pathOf([T(0,0),T(len*.22,-width*.55),T(len*.5,-width*.5),T(len*.82,-width*.22),T(len,0),T(len*.82,width*.22),T(len*.5,width*.5),T(len*.22,width*.55)],key,3);
+}
+const WEB_RADIALS=Array.from({length:15},(_,i)=>{const r=rngFor('web:r'+i);return i*TAU/15+(r()-.5)*.16;});
+const WEB_TURNS=13;
+function webSpiral(disp){
+  const pts=[];
+  for(let t=0;t<WEB_TURNS;t++)for(let j=0;j<WEB_RADIALS.length;j++)for(let k=0;k<7;k++){
+    const a0=WEB_RADIALS[j],a1=(j+1<WEB_RADIALS.length?WEB_RADIALS[j+1]:WEB_RADIALS[0]+TAU),f=k/7;
+    const a=lerp(a0,a1,f),tt=t+(j+f)/WEB_RADIALS.length,r0=46+tt*40*(1+tt*.012);
+    const r=r0-r0*.07*Math.sin(Math.PI*f)+disp(r0,a);
+    pts.push([540+Math.cos(a)*r,540+Math.sin(a)*r]);
+  }
+  return pts;
+}
+const WEB_DEW=Array.from({length:22},(_,i)=>{const r=rngFor('dew'+i);return{t:2+Math.floor(r()*10),j:Math.floor(r()*15),f:.25+r()*.5,size:2.8+r()*3.4};});
+scene('web',{
+  inks:['indigo','violet','blue'],
+  plates(g,ink,rng,sr){
+    const leaves=[leafPath(-30,110,.42,410,132,'leaf1'),leafPath(80,-40,1.05,360,118,'leaf2'),leafPath(-60,340,.08,330,104,'leaf3')];
+    const stem=nib([[-40,60],[40,120],[100,200]],u=>9-4*u);
+    const ribs=leaves.map((_,i)=>[[-30,110,.42,410],[80,-40,1.05,360],[-60,340,.08,330]][i]).map(([x,y,a,l])=>nib([[x,y],[x+Math.cos(a)*l*.5,y+Math.sin(a)*l*.5],[x+Math.cos(a)*l*.92,y+Math.sin(a)*l*.92]],u=>3.2-2.4*u));
+    if(ink==='indigo'||ink==='violet'){
+      print(g,unionPaths(leaves),ink==='indigo'?.92:.82);print(g,stem,.9);
+      for(const r of ribs)carve(g,r);
+      if(ink==='indigo')carve(g,yearPath('web',40,262,26));
+    }
+    if(ink==='blue'){
+      shade(g,null,{x:60,y:120,r0:0,r:560,stops:[[0,.2],[1,0]]});
+      carve(g,unionPaths(leaves));
+    }
+  },
+  live(ctx,s){
+    const R=fract(s*.8)*760,env=life(R/760,.1)*(1-Math.exp(-R/50));
+    const disp=(r,a)=>13*env*gauss(r-R,52)*Math.sin((r-R)/20);
+    const spiral=webSpiral(disp);
+    inkPass(ctx,'blue',{alpha:.9},g=>{
+      g.lineWidth=1.75;g.lineCap='round';
+      for(let j=0;j<WEB_RADIALS.length;j++){const a=WEB_RADIALS[j],side=j%2?1:-1;g.beginPath();
+        for(let k=0;k<=40;k++){const r=k/40*920,d=side*disp(r,a)*.7;g.lineTo(540+Math.cos(a)*r-Math.sin(a)*d,540+Math.sin(a)*r+Math.cos(a)*d);}g.stroke();}
+      g.lineWidth=1.35;g.beginPath();spiral.forEach((p,i)=>i?g.lineTo(p[0],p[1]):g.moveTo(p[0],p[1]));g.stroke();
+    });
+    const drops=[],glints=[];
+    for(const d of WEB_DEW){const idx=(d.t*WEB_RADIALS.length+d.j)*7+Math.floor(d.f*7),p=spiral[idx];if(!p)continue;
+      drops.push(discPath(p[0],p[1],d.size));glints.push(discPath(p[0]-d.size*.3,p[1]-d.size*.3,d.size*.32));}
+    const du=unionPaths(drops);paperShape(ctx,du);
+    inkPass(ctx,'blue',{alpha:.85},g=>{g.lineWidth=1;g.stroke(du);});
+    directInk(ctx,'blue',du,.35);
+    paperShape(ctx,unionPaths(glints));
+  }
+});
+
+/* ── passages ───────────────────────────────────────────────────────────────── */
+function paintWorld(ctx,id,s=0,swap=null){
+  ctx.drawImage(paper,0,0);ctx.save();ctx.globalCompositeOperation='multiply';
+  ctx.drawImage(bakeScene(id,W,swap),0,0);ctx.restore();
+  if(SCENES[id].live)SCENES[id].live(ctx,Math.max(0,s));
+}
+function bakeList(){
+  const list=WORLD_IDS.map(id=>({id,size:W}));
+  for(const c of CUES)if(c.scene&&c.swap&&!list.some(e=>e.id===c.scene&&e.swap===c.swap))list.push({id:c.scene,size:W,swap:c.swap});
+  list.push({id:'night',size:W});
+  return list;
+}
+
+/* Visual events also schedule the score. Openings overlap the outgoing cue. */
+const FLOW=[
+  {start:6,scene:'drop',open:.66,reveal:'iris',ink:'violet'},
+  {start:7.25,scene:'forks',open:.72,reveal:'sweep',angle:-Math.PI/4,ink:'blue'},
+  {start:8.5,scene:'prism',open:.62,reveal:'iris',ink:'orange'},
+  {start:9.75,scene:'orrery',open:.65,reveal:'sweep',angle:2.05,ink:'orange'},
+  {start:11,scene:'web',open:.68,reveal:'iris',ink:'blue'},
+  {start:12.5,scene:'hall',open:.65,reveal:'sweep',angle:Math.PI*.92,ink:'violet',swap:'dusk'}
+];
+const ANSWER_PULSES=[
+  {s:.1,ink:'orange'},{s:.6,ink:'blue'},{s:1.1,ink:'orange'},
+  {s:1.6,ink:'blue'},{s:2.1,ink:'orange'},{s:2.6,ink:'blue'},{s:3.1,ink:'orange'},{s:3.5,ink:'blue'}
+];
+
+/* Windows reveal pinned artwork. No resampling of screened bitmaps occurs here. */
+function drawWindow(ctx,c,t){
+  const age=t-c.start;
+  let r=(c.radius||300)*easeInOutCubic(phase(age,0,c.open||.34));
+  if(c.dive!==undefined)r=lerp(r,CORNER+24,easeInOutCubic(phase(age,c.dive,.5)));
+  if(c.exit)r*=1-easeInOutCubic(phase(age,c.dur-.25,.25));
+  if(r<.1)return;
+  ctx.save();ctx.beginPath();ringAt(ctx,540,540,r,wobbler('window'+c.scene),.006);ctx.clip();
+  paintWorld(ctx,c.scene,age,c.swap);ctx.restore();
+  if(r<CORNER)inkPass(ctx,c.rim||'blue',{alpha:.7},g=>{
+    g.lineWidth=1.8;ringPath(g,540,540,r+5,wobbler('window'+c.scene),.006);g.stroke();
+  });
+}
+function drawWorld(ctx,c,t){
+  const opening=c.open||c.iris||0,u=opening?phase(t,c.start,opening):1;
+  if(u<=0)return;
+  const e=c.open?(1-Math.cos(Math.PI*u))*.5:easeInOutCubic(u);
+  let mask=null,edge=null;
+  if(u<1){
+    mask=new Path2D();
+    if(c.reveal==='sweep'){
+      const ca=Math.cos(c.angle),sa=Math.sin(c.angle),front=lerp(-990,990,e);
+      const point=(n,s)=>[540+n*ca-s*sa,540+n*sa+s*ca];
+      edge=Array.from({length:70},(_,i)=>{
+        const s=lerp(-1130,1130,i/69),bend=46*Math.sin(s/275+.55)*Math.sin(Math.PI*u);
+        return point(front+bend,s);
+      });
+      mask.moveTo(...point(-1300,-1130));edge.forEach(p=>mask.lineTo(...p));
+      mask.lineTo(...point(-1300,1130));mask.closePath();
+    }else ringAt(mask,540,540,Math.max(.01,(CORNER+72)*e),wobbler('flow:'+c.scene),.007);
+  }
+  ctx.save();if(mask)ctx.clip(mask);
+  paintWorld(ctx,c.scene,t-c.start,c.swap);ctx.restore();
+  if(mask&&c.ink){
+    const alpha=.55*Math.sin(Math.PI*u);
+    if(edge)directInk(ctx,c.ink,nib(edge,wSwell(1.5,.5,.9),{raw:true}),1,alpha);
+    else{
+      ctx.save();ctx.globalCompositeOperation='multiply';ctx.globalAlpha=alpha;
+      ctx.translate(...REG[c.ink]);ctx.strokeStyle=INK[c.ink];ctx.lineWidth=2;ctx.stroke(mask);ctx.restore();
+    }
+  }
+}
+const memoryRadius=t=>lerp(CORNER+72,146,easeOutQuad(phase(t,14,2)));
+function drawRecollection(ctx,c,t){
+  const r=memoryRadius(t),u=c.open?phase(t,c.start,c.open):1;
+  if(u<=0)return;
+  const reveal=r*(1-Math.cos(Math.PI*u))*.5;
+  ctx.save();ctx.beginPath();ctx.arc(540,540,Math.max(.01,reveal),0,TAU);ctx.clip();
+  paintWorld(ctx,c.scene,t-(c.motionStart??c.start),c.swap);ctx.restore();
+}
+function drawMemoryLens(ctx,c,t){
+  const r=memoryRadius(t);
+  inkPass(ctx,'blue',{alpha:.35*(1-phase(t,15.78,.22))},g=>{
+    g.lineWidth=1.8;for(const rr of [r+9,r+18]){ringPath(g,540,540,rr,wobbler('recall'),.004);g.stroke();}
+  });
+}
+
+/* III · memory. Feature glyphs spiral out in three inks, drain to blue, and are drawn into the dot. */
+const FEATURES=Array.from({length:40},(_,i)=>{
+  const r=rngFor('feature'+i);return{angle:i*2.399963,orbit:110+Math.sqrt(i/39)*360,size:13+r()*11,
+    kind:i%4,ink:['blue','orange','violet'][i%3],spin:r()*TAU};
+});
+function featurePath(x,y,a,size,kind,key){
+  const ca=Math.cos(a),sa=Math.sin(a),T=(u,v)=>[x+u*ca-v*sa,y+u*sa+v*ca];
+  if(kind===0){const p=new Path2D();p.addPath(discPath(x,y,size*.5));p.addPath(discPath(x,y,size*.28));return p;}
+  if(kind===1)return pathOf([T(-size*.5,size*.4),T(size*.55,0),T(-size*.5,-size*.4)],key,1);
+  if(kind===2)return pathOf([T(-size*.45,-size*.45),T(size*.45,-size*.45),T(size*.45,size*.45),T(-size*.45,size*.45)],key,1);
+  return nib([T(-size*.6,0),T(size*.6,0)],wSwell(size*.16,.5,.6));
+}
+const MEMORY_ABSORB={at:1.12,dur:.62};
+function drawMemory(ctx,c,t){
+  const s=t-c.start,enter=easeOutQuad(phase(s,0,.65)),absorb=easeInQuad(phase(s,MEMORY_ABSORB.at,MEMORY_ABSORB.dur));
+  if(s<.28){
+    ctx.save();ctx.beginPath();ctx.arc(540,540,146*(1-easeInOutCubic(s/.28)),0,TAU);ctx.clip();
+    paintWorld(ctx,'neuron',.5+s);ctx.restore();
+  }
+  const drain=phase(s,.66,.4),groups={blue:[],orange:[],violet:[]},all=[];
+  FEATURES.forEach((m,i)=>{
+    const a=m.angle+s*(i%2?-.25:.25),r=m.orbit*enter*(1-absorb);
+    const size=m.size*enter*(1-absorb*.8);
+    if(size<.6||r<8)return;
+    const x=540+Math.cos(a)*r,y=540+Math.sin(a)*r;
+    const p=featurePath(x,y,m.spin+s*.6,size,m.kind,'feat'+i);
+    groups[m.ink].push(p);all.push(p);
+  });
+  for(const ink of ['blue','orange','violet'])inkPass(ctx,ink,{coverage:.8,alpha:1-drain},g=>{g.fillStyle='#000';groups[ink].forEach(p=>g.fill(p,'evenodd'));});
+  if(drain>0)inkPass(ctx,'blue',{coverage:.66,alpha:drain},g=>{g.fillStyle='#000';all.forEach(p=>g.fill(p,'evenodd'));});
+}
+
+/* IV · answer. The orange voice arrives from the upper right; the two voices' waves interfere. */
+function voices(t){
+  const move=easeInOutCubic(phase(t,18.1,2.1)),close=easeInOutCubic(phase(t,20.2,1.8));
+  const result=[[lerp(540,428,move)+close*72,lerp(540,652,move)-close*86],
+    [lerp(1190,700,move)-close*116,lerp(-90,326,move)+close*140]];
+  const gather=easeInQuad(phase(t,21.65,.35));
+  return result.map(([x,y])=>[lerp(x,540,gather),lerp(y,540,gather)]);
+}
+function dotPos(t,which){return voices(t)[which==='orange'?1:0];}
+function drawAnswerRipples(ctx,t){
+  const [[bx,by],[ox,oy]]=voices(Math.min(t,RELEASE.start));
+  for(const event of ANSWER_PULSES){
+    const u=phase(t,18+event.s,1.2);if(u<=0||u>=1)continue;
+    const [x,y]=event.ink==='orange'?[ox,oy]:[bx,by];
+    inkPass(ctx,event.ink,{alpha:(1-u)*.9},g=>{
+      g.lineWidth=3.5*(1-u)+.5;
+      ringPath(g,x,y,lerp(14,480,easeOutQuad(u)),wobbler('answer'+event.s),.01);g.stroke();
+    });
+  }
+}
+/** Nodal lines of two point sources: |PB| − |PO| = kλ, a family of hyperbolas about the pair. */
+function interference(ctx,t,strength){
+  if(strength<=.01)return;
+  const [[bx,by],[ox,oy]]=voices(Math.min(t,RELEASE.start));
+  const dx=ox-bx,dy=oy-by,d=Math.hypot(dx,dy);if(d<20)return;
+  const cx=(bx+ox)/2,cy=(by+oy)/2,c=d/2,ca=dx/d,sa=dy/d;
+  const lam=d/3,marks=[new Path2D(),new Path2D()],reach=Math.min(d*1.35,560);
+  for(let k=-3;k<=3;k++){
+    const a=k*lam/2;if(Math.abs(a)>=c*.97)continue;
+    const b=Math.sqrt(c*c-a*a);
+    for(let i=-26;i<=26;i++){
+      const u=i*.11,px=a*Math.cosh(u),py=b*Math.sinh(u);
+      const x=cx+px*ca-py*sa,y=cy+px*sa+py*ca;
+      const far=Math.hypot(x-cx,y-cy);if(far>reach)continue;
+      const w=1-Math.pow(far/reach,2);
+      marks[Math.abs(k)%2].addPath(discPath(x,y,(2.8+2.4*w)*strength));
+    }
+  }
+  directInk(ctx,'orange',marks[0],1,.85*strength);directInk(ctx,'violet',marks[1],1,.7*strength);
+}
+function drawAnswer(ctx,c,t){
+  const s=t-18,[[bx,by],[ox,oy]]=voices(t);
+  const wash=phase(s,0,2.3),radius=(170+wash*470)*(1-easeInOutCubic(phase(s,3.4,.6)));
+  bandPass(ctx,'orange',{},[.0625,.125,.1875].map((coverage,i)=>({coverage,path:discPath(1130,-60,radius-i*96)})));
+  drawAnswerRipples(ctx,t);
+  interference(ctx,t,phase(s,1.2,1.6)*(1-phase(s,3.72,.28)));
+  const tension=phase(s,3.1,.9);
+  if(tension>.25)inkPass(ctx,'orange',{},g=>{
+    const v=phase(tension,.25,.75);
+    for(let i=0;i<11;i++){
+      const a=i*TAU/11+v*.9,r=10+58*v;
+      g.fill(nib([[540+Math.cos(a)*r,540+Math.sin(a)*r],[540+Math.cos(a)*(r+14*v),540+Math.sin(a)*(r+14*v)]],wTip(1.9)));
+    }
+  });
+  drawDotAt(ctx,bx,by,'indigo',DOT_R,null,'blue');
+  if(ox<1110&&oy>-30&&Math.hypot(ox-bx,oy-by)>3)drawDotAt(ctx,ox,oy,'orange',DOT_R+1,null,'yellow');
+}
+
+/* V · emergence. A thought branches out of the meeting point. */
+const RELEASE={start:22,growth:.62,decay:.82,stagger:.05};
+const ARBOR=arbor('emergence',540,540,{n0:9,len:470,w:27,depth:3,kids0:3,kids:2,bend:1.15,jitter:.22,turn:.78,turnVar:.45,
+  shrink:.56,thin:.6,atMin:.3,atMax:.85,dur:RELEASE.growth,decay:RELEASE.decay,stagger:RELEASE.stagger,spread:.35});
+const ARBOR_TIPS=ARBOR.filter(b=>b.depth===3);
+const PULSES=[23,23.5];
+function drawArbor(ctx,age,scale=1,x=540,y=540,alpha=1,glow=false){
+  const grown=arborPaths(ARBOR,age,scale,x,y);if(!grown.length)return;
+  if(glow){const gr=easeOutQuad(phase(age,.1,.9))*(1-phase(age,1.95,.45));
+    if(gr>.01)bandPass(ctx,'yellow',{},[.0625,.125,.1875].map((coverage,i)=>({coverage,path:discPath(x,y,(520-i*150)*gr)})));}
+  const all=unionPaths(grown.map(p=>p.path)),thin=unionPaths(grown.map(p=>p.thin)),core=unionPaths(grown.filter(p=>p.b.depth<2).map(p=>p.core));
+  paperShape(ctx,all);
+  bandPass(ctx,'violet',{alpha},[{coverage:.45,path:all},{coverage:.85,path:thin}]);
+  directInk(ctx,'indigo',core,1,.9*alpha);
+  const buds=[],cores=[];
+  for(const p of grown){if(p.b.depth<3)continue;const bud=settle(phase(age,p.b.t0+p.b.dur*.9,.3),{bounces:1,damp:5});if(bud<=0)continue;
+    buds.push(discPath(p.tip[0],p.tip[1],(11*bud)*scale));cores.push(discPath(p.tip[0],p.tip[1],(4.4*bud)*scale));}
+  if(buds.length){const bu=unionPaths(buds);paperShape(ctx,bu);directInk(ctx,'orange',bu,1,.92*alpha);directInk(ctx,'yellow',unionPaths(cores),1,alpha);}
+  const beads=[],beadCores=[];
+  for(const t0 of PULSES){
+    const t=RELEASE.start+age;if(t<t0||t>t0+.9)continue;
+    for(const p of grown){const b=p.b,u=phase(t,t0+b.t0*.5,.34);if(u<=0||u>=1)continue;
+      const head=u*p.e,r=(6.5-b.depth*1.1)*scale*Math.sin(Math.PI*Math.min(1,u*1.3+.2));
+      const tail=segment(b.pts,Math.max(0,head-.3),head,6).map(([px,py])=>[x+(px-540)*scale,y+(py-540)*scale]);
+      beads.push(nib(tail,wSwell(r,.85,.5),{raw:true}));beadCores.push(discPath(tail[5][0],tail[5][1],r*.5));}
+  }
+  if(beads.length){const bu=unionPaths(beads);paperShape(ctx,bu);directInk(ctx,'orange',bu,1,.85*alpha);directInk(ctx,'yellow',unionPaths(beadCores),1,alpha);}
+}
+function drawRelease(ctx,c,t){
+  const age=t-RELEASE.start;
+  if(age<.35)drawAnswerRipples(ctx,t);
+  if(age<.32){
+    inkPass(ctx,'orange',{alpha:1-phase(age,.08,.24)},g=>{
+      const r=rngFor('sparks');
+      for(let i=0;i<22;i++){const a=r()*TAU,sp=260+r()*420,v=Math.min(age,.4),d=sp*(1-Math.exp(-v*6));
+        g.fill(nib([[540+Math.cos(a)*d*.72,540+Math.sin(a)*d*.72],[540+Math.cos(a)*d,540+Math.sin(a)*d]],wTip(2.2)));}
+    });
+  }
+  drawArbor(ctx,age-.04,1,540,540,1,true);
+  if(age<.3)drawDotAt(ctx,540,540,'indigo',DOT_R*(1-phase(age,.05,.25)),null,'blue');
+}
+
+/* The night: the arbor is one cell of many. */
+scene('night',{
+  inks:['blue','indigo'],
+  plates(g,ink,rng){
+    tone(g,ink==='indigo'?.95:.72);g.fillRect(0,0,W,W);
+    if(ink==='blue')shade(g,null,{x:540,y:540,r:640,cut:true,stops:[[0,.55],[.5,.2],[1,0]]});
+    g.save();g.globalCompositeOperation='destination-out';grainStars(g,rngFor('night:stars'),520);g.restore();
+  }
+});
+const NET=Array.from({length:120},(_,i)=>{
+  const r=rngFor('net'+i);return{a:i*2.399963+r()*.3,r:i?95+Math.sqrt(i/119)*980:0,size:3.6+r()*3.2,phase:r()};
+});
+const NET_EDGES=(()=>{
+  const pos=NET.map(n=>[540+Math.cos(n.a)*n.r,540+Math.sin(n.a)*n.r]),edges=[],seen=new Set();
+  NET.forEach((n,i)=>{
+    const near=pos.map((p,j)=>[Math.hypot(p[0]-pos[i][0],p[1]-pos[i][1]),j]).filter(([d,j])=>j!==i).sort((a,b)=>a[0]-b[0]).slice(0,i?2:4);
+    for(const [d,j] of near){const key=Math.min(i,j)+'-'+Math.max(i,j);if(seen.has(key))continue;seen.add(key);edges.push({i,j,phase:rngFor('edge'+key)(),hz:.55+rngFor('edgehz'+key)()*.4});}
+  });
+  return edges;
+})();
+function drawNetwork(ctx,c,t){
+  const age=t-24,entry=easeInOutCubic(phase(age,0,.44)),exit=1-easeInOutCubic(phase(age,1.62,.38));
+  const radius=(CORNER+20)*entry*exit;
+  ctx.save();ctx.beginPath();ctx.arc(540,540,Math.max(.001,radius),0,TAU);ctx.clip();paintWorld(ctx,'night',0);
+  const camera=lerp(2.3,.8,easeInOutCubic(phase(age,.05,1.25)));
+  const pos=NET.map(n=>[540+Math.cos(n.a+age*.012)*n.r*camera,540+Math.sin(n.a+age*.012)*n.r*camera]);
+  const visible=p=>p[0]>-40&&p[0]<1120&&p[1]>-40&&p[1]<1120;
+  const appear=easeOutQuad(phase(age,.3,.7));
+  const wires=[];
+  for(const e of NET_EDGES){const a=pos[e.i],b=pos[e.j];if(!visible(a)&&!visible(b))continue;wires.push(nib([a,b],()=>.9,{per:2}));}
+  if(wires.length&&appear>.01){const wu=unionPaths(wires);paperShape(ctx,wu);directInk(ctx,'blue',wu,1,.75*appear);}
+  const dashes=[];
+  for(const e of NET_EDGES){
+    const a=pos[e.i],b=pos[e.j];if(!visible(a)&&!visible(b))continue;
+    const v=fract(age*e.hz+e.phase),l=life(v,.22)*appear;if(l<.03)continue;
+    const p0=Math.max(0,v-.09),p1=v;
+    dashes.push(nib([[lerp(a[0],b[0],p0),lerp(a[1],b[1],p0)],[lerp(a[0],b[0],p1),lerp(a[1],b[1],p1)]],wSwell(2.4*l,.5,.6),{per:4}));
+  }
+  const lights=[],cores=[];
+  NET.forEach((n,i)=>{if(!i)return;const p=pos[i];if(!visible(p))return;
+    const size=n.size*(.86+.14*Math.sin(age*2.2+n.phase*TAU))*appear;
+    lights.push(discPath(p[0],p[1],size));cores.push(discPath(p[0],p[1],size*.42));});
+  const lit=unionPaths(lights.concat(dashes));paperShape(ctx,lit);
+  if(dashes.length)directInk(ctx,'orange',unionPaths(dashes),1,.9);
+  directInk(ctx,'orange',unionPaths(lights),1,.85);directInk(ctx,'yellow',unionPaths(cores));
+  ctx.restore();
+  const size=lerp(1,.075,easeInOutCubic(phase(age,0,1.15)))*exit;
+  if(size>.002)drawArbor(ctx,2+age,size);
+}
+
+/* VI · title. */
+const TITLE=letterStrokes('emergence',124,412,4,true),BYLINE=letterStrokes('many small things learning to listen',23,690,3);
+let signatureCells=null;
+function bakeSignature(){
+  const c=cv(W,W),g=c.getContext('2d');g.fillStyle='#000';writeLetters(g,TITLE,1,5.6);writeLetters(g,BYLINE,1,1.4);
+  const pixels=g.getImageData(0,0,W,W).data,r=rngFor('signature:dissolve');signatureCells=[];
+  for(let y=380;y<740;y+=4)for(let x=60;x<1020;x+=4)if(pixels[(y*W+x)*4+3]>25)signatureCells.push([x,y,r()]);
+}
+function drawSignature(ctx,c,t){
+  const age=t-26,fade=phase(age,1.68,.3);
+  if(fade>0){
+    if(!signatureCells)bakeSignature();
+    for(const ink of ['orange','indigo'])inkPass(ctx,ink,{},g=>{
+      for(const [x,y,delay] of signatureCells){const v=1-phase(fade,delay*.34,.66);if(v<.01)continue;
+        g.beginPath();g.arc(x,y,2.55*v,0,TAU);g.fill();}
+    });
+  }else{
+    for(const ink of ['orange','indigo'])inkPass(ctx,ink,{alpha:ink==='orange'?.72:1},g=>{
+      writeLetters(g,TITLE,phase(age,.02,.95),5.6);writeLetters(g,BYLINE,phase(age,.8,.5),1.4);
+    });
+  }
+  const r=DOT_R*(1-.75*phase(age,1.7,.3));
+  if(age>.2){drawDotAt(ctx,516,635,'indigo',r,null,'blue');drawDotAt(ctx,564,635,'orange',r,null,'yellow');}
+  const q=phase(age,.9,.65);
+  if(q>0&&q<1)inkPass(ctx,'orange',{alpha:(1-q)*.6},g=>{
+    g.lineWidth=1.2;ringPath(g,564,635,12+q*58,wobbler('sign:ring'),.01);g.stroke();
+  });
+}
+
+/* ── score ────────────────────────────────────────────────────────────────────
+   Two complete arrangements share the picture's event data. The four-note cell
+   branches by rhythm and register; scene cuts do not change the instrument. */
+const SCORE_NAMES={warm:'A · Gravity',pulse:'B · Orbit'};
+const DEFAULT_SCORE='warm';
+let selectedScore=new URLSearchParams(location.search).get('score')||DEFAULT_SCORE;
+if(!Object.hasOwn(SCORE_NAMES,selectedScore))selectedScore=DEFAULT_SCORE;
+const scorePromises=new Map();
+function scoreEvents(){
+  const cue=kind=>CUES.find(c=>c.kind===kind);
+  return {call:cue('ripple').start,window:cue('window').start,montage:FLOW[0].start,
+    recall:cue('recall').start,memory:cue('memory').start,
+    absorb:cue('memory').start+MEMORY_ABSORB.at+MEMORY_ABSORB.dur,
+    answer:cue('answer').start,reply:cue('answer').start+ANSWER_PULSES[0].s,
+    contact:RELEASE.start,night:cue('network').start,title:cue('signature').start};
+}
+function scoreMarks(){const e=scoreEvents();return[e.montage,e.absorb,e.reply,e.contact,e.night].map(t=>+t.toFixed(3));}
+
+function scoreBed(s,e,kind){
+  const warm=kind==='warm';
+  const chords=warm?[
+    [.025,e.montage+1.2,['D3','A3','E4'],.018,1.2],
+    [e.montage-.85,e.memory+.4,['B2','F#3','D4','A4'],.019,1.4],
+    [e.recall-.8,e.reply+1,['G2','A3','B3','D4'],.016,1.4],
+    [e.answer-.75,e.contact+1,['A2','E3','B3','D4'],.019,1.5],
+    [e.contact-.15,e.title+.4,['D3','A3','B3','E4','F#4'],.021,.8],
+    [e.night-.4,DUR-.12,['D3','A3','E4','F#4'],.013,1.3]
+  ]:[
+    [.025,e.montage+1,['D3','A3','C4','E4'],.015,1.2],
+    [e.montage-.8,e.memory+.45,['G2','D3','A3','B3'],.019,1.3],
+    [e.recall-.8,e.reply+1,['E3','A3','B3','D4'],.017,1.4],
+    [e.answer-.7,e.contact+.85,['A2','E3','G3','B3'],.018,1.3],
+    [e.contact-.1,e.title+.4,['D3','A3','C4','E4','B4'],.020,.8],
+    [e.night-.35,DUR-.12,['D3','A3','C4','E4'],.012,1.1]
+  ];
+  for(const [at,end,notes,level,attack] of chords)pad(s,at,end,notes.map(note),{
+    level,attack,release:Math.min(2.1,(end-at)*.46),cutoff:750,
+    open:warm?400:650,spread:.42,send:.18,type:'triangle'});
+  if(warm){
+    const roots=[[e.window,e.montage+.9,'D2'],[e.montage-.25,e.recall+.7,'B1'],
+      [e.recall-.2,e.reply+.5,'G2'],[e.answer-.2,e.contact+.7,'A2'],
+      [e.contact,e.title+1,'D2']];
+    for(const [at,end,n] of roots)organ(s,at,end,note(n),{level:.035,attack:.45,
+      release:1,send:0,drawbars:[[1,1],[2,.3],[3,.08]]});
+  }else{
+    organ(s,e.memory-.4,e.reply+.8,note('A3'),{level:.014,attack:1.1,
+      release:1.1,send:.12,drawbars:[[1,1],[2,.16]]});
+  }
+  // The memory cut sheds detail, not momentum: pedal, air and a fading pulse
+  // cross 16 seconds together and yield only after the answering voice arrives.
+  organ(s,e.recall-.8,e.reply+1.15,note('A2'),{level:.022,attack:1.2,
+    release:1.5,send:.10,drawbars:[[1,1],[2,.35],[3,.08]]});
+  wind(s,e.recall-1,e.reply+1.1,{level:.050,centre:470,sweep:150,gust:.12,
+    whistle:0,pan:0,send:.18,rise:1.8,fall:1.6,key:'memory-air'});
+  for(let i=0,at=e.recall;at<e.reply;at=e.recall+(++i)*BEAT*2){
+    const fade=1-phase(at,e.recall-.5,e.reply-e.recall+1.5);
+    lowPulse(s,at,note('A2'),.033*fade);
+  }
+}
+function organLead(s,at,midi,o={}){
+  const d=o.decay??2.9;
+  // Soft organ pipes: low octave support, harmonic partials, no hard exciter.
+  struck(s,at,midi,[[.5,.10,d],[1,1,d],[2,.29,d*.9],[3,.11,d*.75],
+    [4,.045,d*.65]],{level:.070,attack:.075,strike:0,send:.32,...o});
+}
+function softPulse(s,at,midi,o={}){
+  const d=o.release??2;
+  struck(s,at,midi,[[1,1,d],[2,.23,d*.8],[3,.065,d*.6]],
+    {level:.060,attack:.055,strike:0,send:.25,...o});
+}
+function lowPulse(s,at,midi,level=.060){
+  struck(s,at,midi,[[1,1,1.55],[2,.24,1.2],[3,.06,.8]],
+    {level,attack:.055,send:.015,pan:0,bus:'bed'});
+}
+function scoreForeground(s,e,kind){
+  const warm=kind==='warm',tone=warm?organLead:softPulse;
+  const cell=['D3','A3','E4',warm?'F#3':'F3'].map(note);
+  const phrase=(at,offsets,notes,level,decay=2.8)=>offsets.forEach((dt,i)=>
+    tone(s,at+dt,notes[i],{level:level*[1,.82,.72,.9][i%4],decay,
+      pan:[-.20,.22,.25,-.14][i%4]}));
+  phrase(e.call,[0,.75,1.5,2.5],cell,warm?.095:.067);
+  if(warm){
+    phrase(e.montage-2,[0,.75,1.5],cell.slice(0,3),.061);
+    phrase(e.montage,[0,.75,1.5,2.5],cell,.102);
+    phrase(e.montage+4,[0,1,1.75,2.75],cell,.090);
+    phrase(e.recall,[0,.8,1.6,2.4],[cell[2],cell[1],cell[3],cell[0]],.058,2.9);
+    organLead(s,e.memory+1.2,note('A3'),{level:.025,decay:2.3,pan:-.09});
+  }else{
+    // A low, half-time ostinato keeps its grid while the picture folds inward.
+    const pattern=[0,1,2,null,1,3,1,null];
+    for(let i=0,t=e.window;t<e.reply-.2;i++,t=e.window+i*BEAT){
+      const k=pattern[i%8];if(k===null)continue;
+      const full=t>=e.montage,rewind=t>=e.recall;
+      const n=rewind?cell[3-k]:cell[k];
+      const fade=1-.82*phase(t,e.recall,e.reply-e.recall);
+      softPulse(s,t,n,{level:(full?.043:.026)*(i%8===0?1.06:.88)*fade,
+        pan:k%2?.18:-.18,release:rewind?2.8:1.9});
+      if(full&&i%2===0&&t<e.recall)lowPulse(s,t,note('G2'),.042);
+    }
+    phrase(e.montage,[0,1.5,3,5.5],cell,.038);
+  }
+  // The orange line is a complementary answer; both pans converge with the dots.
+  const blue=warm?['D3','E3','F#3','A3']:['D3','E3','F3','A3'];
+  const orange=warm?['F#3','A3','B3','A3']:['F3','A3','B3','A3'];
+  ANSWER_PULSES.forEach((p,i)=>{
+    const at=e.answer+p.s,isOrange=p.ink==='orange',j=Math.floor(i/2);
+    const [x]=voices(at)[isOrange?1:0];
+    tone(s,at,note((isOrange?orange:blue)[j]),{level:(warm?.064:.045)*(1+i*.025),
+      decay:2.4,release:2.2,hit:at+.06,x:clamp(x,340,770),pan:null});
+    if(!warm&&i%2===0)lowPulse(s,at,note('A2'),.041);
+  });
+}
+function scoreEnding(s,e,kind){
+  const warm=kind==='warm',tone=warm?organLead:softPulse;
+  // One inhalation prepares contact. Its peak falls just before the dots join.
+  breath(s,e.contact-1.45,1.65,{level:warm?.038:.044,from:280,to:1400,
+    back:650,peakAt:.87,q:.55,send:.24,color:'pink',key:'joining'});
+  // The first chord note meets the contact; the rest opens with the arbor.
+  const arrival=warm?['D3','A3','E4','F#4']:['D3','A3','E4','B3'];
+  const roots=ARBOR.filter(b=>b.depth===0).slice(0,4);
+  arrival.forEach((n,i)=>{
+    const at=e.contact+(i===0?0:.04+(roots[i]?.t0??0)+i*RELEASE.stagger);
+    tone(s,at,note(n),{level:(warm?.068:.052)*[1,.68,.57,.48][i],
+      decay:3.2,release:2.9,hit:at+.06,pan:[0,-.2,.22,.10][i]});
+  });
+  if(!warm){
+    lowPulse(s,e.contact,note('D2'),.060);
+    const bloom=['D3','A3','E4','B3'];
+    for(let i=1;i<4;i++)softPulse(s,e.contact+i*BEAT,note(bloom[i]),{
+      level:.028,release:2.5,pan:i%2?.18:-.18});
+  }
+  PULSES.forEach((at,i)=>tone(s,at,note(i?'B3':'A3'),
+    {level:warm?.028:.026,decay:2.5,release:2.3,hit:at+.06,pan:i?.16:-.16}));
+  // The network sheds the pulse and leaves the opening motif suspended.
+  const end=warm?['D4','A3','E4','F#3']:['D4','A3','E4','B3'];
+  [e.night,e.night+.75,e.title,e.title+.75].forEach((at,i)=>tone(s,at,note(end[i]),{
+    level:(warm?.045:.038)*[1,.7,.74,.55][i],decay:Math.min(2,DUR-at-.08),
+    release:Math.min(2,DUR-at-.08),hit:at+.06,pan:[-.12,.15,.08,0][i]}));
+}
+
+function buildScore(kind=selectedScore){
+  if(!Object.hasOwn(SCORE_NAMES,kind))kind=DEFAULT_SCORE;
+  if(!scorePromises.has(kind))scorePromises.set(kind,(async()=>{
+    const e=scoreEvents(),s=Score({duration:DUR,key:'emergence:'+kind,
+      room:{seconds:3.1,decay:.9,predelay:.032,wet:.012,returnLowpass:2800}});
+    air(s,{level:.014,highpass:250,lowpass:7800,rise:.12,fall:1.15});
+    scoreBed(s,e,kind);
+    scoreForeground(s,e,kind);
+    scoreEnding(s,e,kind);
+    // Fade the room as well as the sources. A last note's reverb must not be cut at DUR.
+    s.master.gain.setValueAtTime(1,DUR-1.1);
+    s.master.gain.linearRampToValueAtTime(0,DUR-.025);
+    return s.render({target:-16,ceiling:-1.8});
+  })().catch(error=>{scorePromises.delete(kind);throw error;}));
+  return scorePromises.get(kind);
+}
+async function renderAudio(){return wavBase64(await buildScore());}
+
+
+/* ── timeline ───────────────────────────────────────────────────────────────── */
+const ACTS=[{t:0,name:'I · question'},{t:6,name:'II · timeline'},{t:16,name:'III · memory'},
+  {t:18,name:'IV · answer'},{t:22,name:'V · emergence'},{t:26,name:'VI · title'}];
+const CUES=[
+  {start:1.5,dur:1.2,kind:'window',scene:'neuron',radius:330,exit:true,rim:'violet'},
+  {start:2.75,dur:1.1,kind:'window',scene:'valley',radius:305,exit:true,rim:'blue'},
+  {start:3.85,dur:1.85,kind:'window',scene:'loom',radius:310,dive:.55,rim:'orange'},
+  {start:5.15,dur:FLOW[0].start+FLOW[0].open-5.15,kind:'world',scene:'hall',iris:.42},
+];
+FLOW.forEach((shot,i)=>{
+  const next=FLOW[i+1],end=next?next.start+next.open:14;
+  CUES.push({...shot,dur:end-shot.start,kind:'world'});
+});
+const RECALL=[{id:'hall',swap:'dusk'},{id:'loom',swap:'ember'},{id:'valley',swap:'dusk'},{id:'neuron',swap:null}];
+RECALL.forEach((m,i)=>CUES.push({start:14+i*.5,dur:i===3?.5:.85,kind:'recall',scene:m.id,
+  open:i?.35:0,motionStart:i?14+i*.5:12.5,swap:m.swap}));
+CUES.push({start:14,dur:2,kind:'memoryLens'});
+CUES.push({start:16,dur:2,kind:'memory'},{start:18,dur:4,kind:'answer'},
+  {start:22,dur:2,kind:'release'},{start:24,dur:2,kind:'network'},
+  {start:26,dur:2.001,kind:'signature'});
+for(const start of [.1,.85,1.5,2.7,3.7])CUES.push({start,dur:.95,kind:'ripple',ink:'blue',seed:'em'+start});
+const DRAW={ripple:drawRipple,window:drawWindow,world:drawWorld,recall:drawRecollection,
+  memoryLens:drawMemoryLens,memory:drawMemory,answer:drawAnswer,release:drawRelease,network:drawNetwork,signature:drawSignature};
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+canvas.width=canvas.height=W;
+const DEBUG=new URLSearchParams(location.search).get('debug');
+function render(t){
+  t=clamp(t,0,DUR);ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';ctx.drawImage(paper,0,0);
+  const q=new URLSearchParams(location.search),selected=q.get('scene');
+  if(selected&&SCENES[selected]){paintWorld(ctx,selected,t,q.get('swap'));drawDot(ctx,t);return;}
+  for(const cue of CUES) if(t>=cue.start&&t<cue.start+cue.dur)DRAW[cue.kind]?.(ctx,cue,t);
+  if(t<18)drawDot(ctx,t);
+}
+
+let playing=false,playT=0,lastWall=0,rafId=0,audioEnabled=false,liveCtx=null,liveSrc=null,scoreBuffer=null,audioLoad=0;
+const elHead=document.getElementById('play-head'),elScrub=document.getElementById('scrub'),
+  elT=document.getElementById('t'),elPlay=document.getElementById('btn-play');
+function stopSound(){if(liveSrc){liveSrc.onended=null;liveSrc.stop();liveSrc=null;}}
+function startSound(){
+  stopSound();if(!audioEnabled||!scoreBuffer||!playing||playT>=DUR)return;
+  liveCtx=liveCtx||new AudioContext();liveCtx.resume();
+  liveSrc=liveCtx.createBufferSource();liveSrc.buffer=scoreBuffer;liveSrc.connect(liveCtx.destination);
+  liveSrc.start(0,playT);liveSrc.onended=()=>{liveSrc=null;};
+}
+function show(t){playT=clamp(t,0,DUR);render(playT);elHead.style.left=playT/DUR*100+'%';
+  elT.textContent=playT.toFixed(2)+' / 28.00';elScrub.setAttribute('aria-valuenow',playT.toFixed(2));}
+function advancePlayback(now){if(!playing)return;const next=playT+(now-lastWall)/1000;lastWall=now;show(next);
+  if(next>=DUR)setPlaying(false);else rafId=requestAnimationFrame(advancePlayback);}
+function setPlaying(v){cancelAnimationFrame(rafId);playing=v;elPlay.textContent=v?'pause':'play';
+  if(v){if(playT>=DUR)show(0);lastWall=performance.now();startSound();rafId=requestAnimationFrame(advancePlayback);}else stopSound();}
+elPlay.onclick=()=>setPlaying(!playing);
+document.getElementById('btn-replay').onclick=()=>{setPlaying(false);show(0);setPlaying(true);};
+elScrub.onclick=e=>{const r=elScrub.getBoundingClientRect();setPlaying(false);show((e.clientX-r.left)/r.width*DUR);};
+addEventListener('keydown',e=>{if(e.target.matches('select,input,textarea'))return;
+  if(e.code==='Space'&&e.target.tagName!=='BUTTON'){e.preventDefault();setPlaying(!playing);}
+  if(e.code==='ArrowRight'||e.code==='ArrowLeft'){e.preventDefault();setPlaying(false);show(playT+(e.code==='ArrowRight'?1:-1)/30);}});
+for(const a of ACTS){const d=document.createElement('div');d.className='act';d.style.left=a.t/DUR*100+'%';d.textContent=a.name;d.dataset.short=a.name.split(' · ')[0];elScrub.appendChild(d);}
+const audioButton=document.getElementById('btn-audio'),scoreChoice=document.getElementById('score-choice');
+scoreChoice.value=selectedScore;
+async function refreshAudio(){
+  const request=++audioLoad,kind=selectedScore;
+  stopSound();scoreBuffer=null;
+  if(!audioEnabled){audioButton.textContent='sound: off';return;}
+  audioButton.textContent='mixing…';
+  try{
+    liveCtx=liveCtx||new AudioContext();await liveCtx.resume();
+    const buffer=await buildScore(kind);
+    if(request!==audioLoad||!audioEnabled||kind!==selectedScore)return;
+    scoreBuffer=buffer;audioButton.textContent='sound: on';startSound();
+  }catch(error){
+    if(request!==audioLoad)return;
+    audioEnabled=false;audioButton.textContent='sound: retry';console.error(error);
+  }
+}
+audioButton.onclick=()=>{audioEnabled=!audioEnabled;refreshAudio();};
+scoreChoice.onchange=()=>{selectedScore=scoreChoice.value;refreshAudio();};
+document.getElementById('btn-rec').onclick=function(){
+  if(typeof MediaRecorder==='undefined'){this.textContent='unavailable';return;}
+  const mime=['video/mp4;codecs=avc1','video/webm;codecs=vp9','video/webm;codecs=vp8'].find(m=>MediaRecorder.isTypeSupported(m));
+  if(!mime){this.textContent='no codec';return;}
+  const stream=canvas.captureStream(30),rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12e6}),chunks=[];
+  rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+  rec.onstop=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob(chunks,{type:mime}));a.href=url;
+    a.download='emergence'+(mime.startsWith('video/mp4')?'.mp4':'.webm');a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    stream.getTracks().forEach(track=>track.stop());this.textContent='record';this.disabled=false;};
+  this.textContent='recording…';this.disabled=true;setPlaying(false);show(0);rec.start();setPlaying(true);
+  setTimeout(()=>{rec.stop();setPlaying(false);},DUR*1000+100);
+};
+paper=bakePaper();for(const name of Object.keys(INK))screenOf(name);
+window.__riso={duration:DUR,ready:false,marks:scoreMarks(),get score(){return selectedScore;},seek(t){setPlaying(false);show(t);}};
+if(typeof renderAudio==='function')window.__riso.renderAudio=renderAudio;
+(async function boot(){
+  const jobs=typeof bakeList==='function'?bakeList():[],el=document.getElementById('load');
+  for(let i=0;i<jobs.length;i++){el.textContent='printing light · '+(i+1)+' / '+jobs.length;
+    await new Promise(r=>setTimeout(r,0));const j=jobs[i];bakeScene(j.id,j.size||W,j.swap);}
+  el.remove();show(Number(new URLSearchParams(location.search).get('t'))||0);window.__riso.ready=true;
+})();
+</script>
+</html>

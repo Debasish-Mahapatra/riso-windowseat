@@ -1,0 +1,2011 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Lumen — a small impossibility. An original, procedural risograph film.">
+<title>Lumen · a small impossibility</title>
+<style>
+:root{color-scheme:light;--paper:#F2EDE3;--ink:#2E3192}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#e6e0d5;color:var(--ink);font:12px/1.5 ui-monospace,monospace;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:34px 20px;gap:18px}
+header,#ui{width:720px;max-width:100%}header{display:flex;align-items:baseline;justify-content:space-between}header b{font-weight:500;letter-spacing:.36em;font-size:14px}header span{font-size:10px;letter-spacing:.1em;color:#807b83}
+#stage{position:relative;width:720px;height:720px;box-shadow:0 12px 48px #55462520}canvas{display:block;width:720px;height:720px}#load{position:absolute;inset:0;display:grid;place-items:center;background:var(--paper);letter-spacing:.13em}
+#scrub{position:relative;height:26px;border-top:1px solid #2e31922b;cursor:pointer}#play-head{position:absolute;top:-2px;height:8px;width:3px;background:#FF48B0}.act{position:absolute;top:6px;font-size:8px;letter-spacing:.03em;color:#827c87;pointer-events:none}
+#bar{display:flex;align-items:center;gap:8px}button{border:1px solid #2e31922b;padding:7px 12px;background:transparent;color:var(--ink);font:inherit;cursor:pointer;border-radius:2px}button:hover{background:#f2ede3}button:focus-visible,#scrub:focus-visible{outline:2px solid #FF48B0;outline-offset:3px}#t{font-size:10px;color:#797480;padding-left:8px}footer{font-size:9px;letter-spacing:.14em;color:#8c8587}
+@media(max-width:760px),(max-height:800px){body{display:block;padding:0;background:var(--paper)}header,footer{display:none}#stage{margin:0 auto;box-shadow:none}#ui{margin:16px auto;padding:0 14px}}
+@media(max-width:719px){#stage{width:100vw;height:100vw}canvas{width:100vw;height:100vw}.act{font-size:0}.act::after{content:attr(data-short);font-size:8px}#bar{gap:5px}button{font-size:10px;padding:6px 8px;white-space:nowrap}#t{font-size:9px;white-space:nowrap;padding-left:2px}}
+</style>
+<header><b>LUMEN</b><span>A SMALL IMPOSSIBILITY · 28 SECONDS</span></header>
+<div id="stage"><canvas id="c" aria-label="Lumen, a procedural animated film"></canvas><div id="load">mixing light…</div></div>
+<div id="ui"><div id="scrub" role="slider" tabindex="0" aria-label="Film position" aria-valuemin="0" aria-valuemax="28"><div id="play-head"></div></div><div id="bar"><button id="btn-play">play</button><button id="btn-replay">replay</button><span id="t">0.00 / 28.00</span><span style="flex:1"></span><button id="btn-audio">sound: off</button><button id="btn-rec">record</button></div></div>
+<footer>A SEED CONTAINS A SUN</footer>
+<script>
+'use strict';
+
+const CSS  = 720;            // styled size
+const W    = 1080;           // backing store; halftone pitch is defined here
+const DUR  = 28.0;
+const BEAT = 0.5;            // 120 BPM
+
+const PAPER = '#F2EDE3';
+const INK = {
+  blue:   '#0078BF',
+  pink:   '#FF48B0',
+  yellow: '#FFE800',
+  green:  '#00A95C',
+  orange: '#FF6C2F',
+  violet: '#765BA7',
+  indigo: '#2E3192',
+};
+
+/* Screen angles as rational tangents (b/a). A rotated dot grid only repeats
+   seamlessly on a rational tangent, so these are the real angles rather than
+   the nominal 15/45/75 — any other value leaves a visible seam where the
+   pattern tile wraps. */
+const SCREEN = {
+  blue:   { a: 4, b: 1 },   // 14.0°
+  pink:   { a: 1, b: 4 },   // 76.0°
+  yellow: { a: 1, b: 0 },   //  0.0°
+  green:  { a: 1, b: 1 },   // 45.0°
+  orange: { a: 2, b: 1 },   // 26.6°
+  violet: { a: 1, b: 2 },   // 63.4°
+  indigo: { a: 1, b: 1 },   // 45.0°
+};
+const PITCH = 4.6;           // device px between dot centres
+
+/* Registration: each plate misses by a fixed amount, in device px. */
+const REG = {
+  blue:   [ 1.5, -1.0], pink:   [-2.5,  2.0], yellow: [ 2.0,  1.5],
+  green:  [-1.5, -1.5], orange: [ 1.0,  2.0], violet: [-2.0, -1.0],
+  indigo: [ 0.0,  0.0],
+};
+
+/* Alternate colourways for the rewind: a swap remaps which physical plate a
+   logical ink prints on, so a scene replays in different inks without being
+   redrawn. */
+const SWAPS = {
+  swap1: { blue: 'pink', pink: 'blue', yellow: 'violet', green: 'orange',
+           orange: 'green', violet: 'yellow', indigo: 'green' },
+  swap2: { blue: 'violet', pink: 'green', yellow: 'orange', green: 'pink',
+           orange: 'yellow', violet: 'blue', indigo: 'pink' },
+  // Act V prints on two plates only.
+  duo: { blue: 'blue', pink: 'pink', yellow: 'pink', green: 'blue',
+         orange: 'pink', violet: 'blue', indigo: 'blue' },
+};
+
+const DOT_R = W * 0.011;     // 2.2% of frame width, diameter
+const CX = W / 2, CY = W / 2;
+const CORNER = Math.hypot(CX, CY);
+
+/* ── deterministic randomness ─────────────────────────────────────────────── */
+
+function mulberry32(a) {
+  return function () {
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const rngFor = (key) => mulberry32(hash(key));
+
+/** Smooth periodic wobble in θ, so a ring closes on itself without a seam. */
+function wobbler(key, harmonics = 3) {
+  const r = rngFor(key), h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, r() * 2 - 1, r() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, amp, ph]) => s + amp * Math.sin(k * th + ph), 0) / harmonics;
+}
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, u) => a + (b - a) * u;
+const easeOutCubic = (u) => 1 - Math.pow(1 - u, 3);
+const easeInOutCubic = (u) => u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+const easeOutBack = (u, s = 1.70158) => 1 + (s + 1) * Math.pow(u - 1, 3) + s * Math.pow(u - 1, 2);
+const easeInQuad = (u) => u * u;
+
+function cv(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+/* ── halftone screens ─────────────────────────────────────────────────────────
+   For screen angle tanθ = b/a the dot lattice is generated by the orthogonal
+   vectors P/√(a²+b²)·(a,b) and P/√(a²+b²)·(−b,a). That lattice contains
+   (P√(a²+b²), 0), so a square tile of side S = P√(a²+b²) repeats seamlessly and
+   holds exactly a²+b² dots.
+
+   Screens are anchored to canvas space, never to the object being drawn. A
+   screen that rides along with its subject makes the texture crawl, which is
+   the single most recognisable way this look goes wrong.                     */
+
+const screens = {};
+
+function buildScreen(name) {
+  const { a, b } = SCREEN[name];
+  const n = a * a + b * b;
+  const S = Math.max(2, Math.round(PITCH * Math.sqrt(n)));
+  const P = S / Math.sqrt(n);              // effective pitch after rounding
+  const u = P / Math.sqrt(n);
+  const v1 = [u * a, u * b], v2 = [-u * b, u * a];
+
+  // Lattice points reduced into the tile, plus wrapped neighbours so dots that
+  // straddle an edge are drawn on both sides.
+  const pts = [];
+  for (let m = -n; m <= n; m++) {
+    for (let k = -n; k <= n; k++) {
+      const x = m * v1[0] + k * v2[0], y = m * v1[1] + k * v2[1];
+      const wx = ((x % S) + S) % S, wy = ((y % S) + S) % S;
+      if (!pts.some(p => Math.abs(p[0] - wx) < 0.01 && Math.abs(p[1] - wy) < 0.01)) pts.push([wx, wy]);
+    }
+  }
+  const wrapped = [];
+  for (const [x, y] of pts) for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]) wrapped.push([x + dx, y + dy]);
+
+  // Threshold tile: a pixel takes ink when coverage exceeds π·d²/P², which is
+  // the coverage at which a dot of radius d would reach that pixel.
+  const th = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let d2 = Infinity;
+      for (const [px, py] of wrapped) {
+        const dx = x + 0.5 - px, dy = y + 0.5 - py, q = dx * dx + dy * dy;
+        if (q < d2) d2 = q;
+      }
+      th[y * S + x] = clamp(Math.PI * d2 / (P * P), 0, 1);
+    }
+  }
+  return { S, P, pts, wrapped, th, patterns: new Map() };
+}
+
+function screenOf(name) {
+  return screens[name] || (screens[name] = buildScreen(name));
+}
+
+/** Tiled dot pattern at a quantised coverage, for live elements. */
+function dotPattern(ctx, name, coverage) {
+  const sc = screenOf(name);
+  const q = clamp(Math.round(coverage * 16), 0, 16);
+  if (!sc.patterns.has(q)) {
+    const t = cv(sc.S, sc.S), tx = t.getContext('2d');
+    const c = q / 16;
+    if (c >= 1) { tx.fillStyle = '#000'; tx.fillRect(0, 0, sc.S, sc.S); }
+    else if (c > 0) {
+      const r = sc.P * Math.sqrt(c / Math.PI);
+      tx.fillStyle = '#000';
+      for (const [x, y] of sc.wrapped) { tx.beginPath(); tx.arc(x, y, r, 0, Math.PI * 2); tx.fill(); }
+    }
+    sc.patterns.set(q, t);
+  }
+  const pat = ctx.createPattern(sc.patterns.get(q), 'repeat');
+  pat.setTransform(new DOMMatrix());   // pin to canvas space so it cannot swim
+  return pat;
+}
+
+/** Screen a greyscale coverage canvas into hard dots. Bake-time only. */
+function screenCoverage(covCanvas, name) {
+  const sc = screenOf(name);
+  const w = covCanvas.width, h = covCanvas.height;
+  const src = covCanvas.getContext('2d').getImageData(0, 0, w, h);
+  const s = src.data;
+  for (let y = 0; y < h; y++) {
+    const row = (y % sc.S) * sc.S;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const cover = s[i + 3] / 255;
+      s[i + 3] = cover > sc.th[row + (x % sc.S)] ? 255 : 0;
+    }
+  }
+  const out = cv(w, h);
+  out.getContext('2d').putImageData(src, 0, 0);
+  return out;
+}
+
+/* ── ink passes ───────────────────────────────────────────────────────────────
+   Draw coverage into a scratch layer, screen it, tint it, then multiply it onto
+   the paper at that plate's registration offset. Darks come from stacking
+   plates; there is no black ink anywhere in the film.                         */
+
+const scratch = cv(W, W), sx = scratch.getContext('2d');
+
+/**
+ * opts.coverage — dot-screen density, for tonal areas.
+ * opts.alpha    — plate opacity, for fades.
+ * These are separate because punching a screen through a thin stroke reads as a
+ * broken line, not a lighter one; line work fades on alpha and width instead.
+ */
+function inkPass(ctx, name, opts, drawFn) {
+  const coverage = opts.coverage === undefined ? 1 : opts.coverage;
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+  sx.save();
+  drawFn(sx);
+  sx.restore();
+
+  if (coverage < 1) {                       // punch the dot screen out of the shape
+    sx.save();
+    sx.globalCompositeOperation = 'destination-in';
+    sx.fillStyle = dotPattern(sx, name, coverage);
+    sx.fillRect(0, 0, W, W);
+    sx.restore();
+  }
+  sx.save();                                // tint
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/* ── paper ────────────────────────────────────────────────────────────────────
+   Cloudy mottling rather than fine grain: the reference shows blotches a few
+   hundred px across at low contrast. Baked once, never recomputed, because any
+   per-frame regeneration flickers.                                           */
+
+let paper = null;
+
+function bakePaper() {
+  const c = cv(W, W), x = c.getContext('2d');
+  x.fillStyle = PAPER; x.fillRect(0, 0, W, W);
+
+  const r = rngFor('paper');
+
+  // Mottling is a warm wash with noisy alpha, not a neutral multiply: greyscale
+  // noise multiplied over cream desaturates it and reads as smoke rather than
+  // paper. Keep it subtle at full size and only obvious when zoomed.
+  for (const [res, maxA] of [[30, 0.10], [72, 0.075], [165, 0.05]]) {
+    const n = cv(res, res), nx = n.getContext('2d');
+    const img = nx.createImageData(res, res);
+    for (let i = 0; i < res * res; i++) {
+      img.data[i * 4] = 0xB4; img.data[i * 4 + 1] = 0xA6; img.data[i * 4 + 2] = 0x8C;
+      img.data[i * 4 + 3] = Math.pow(r(), 1.8) * 255 * maxA;
+    }
+    nx.putImageData(img, 0, 0);
+    x.save();
+    x.imageSmoothingEnabled = true;
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(n, 0, 0, W, W);
+    x.restore();
+  }
+
+  x.save();                                  // fibres
+  x.strokeStyle = '#8a7f6a';
+  for (let i = 0; i < 420; i++) {
+    const px = r() * W, py = r() * W, len = 5 + r() * 22, ang = r() * Math.PI;
+    x.globalAlpha = 0.008 + r() * 0.016;
+    x.lineWidth = 0.5 + r() * 0.7;
+    x.beginPath();
+    x.moveTo(px, py);
+    x.quadraticCurveTo(px + Math.cos(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       py + Math.sin(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       px + Math.cos(ang) * len, py + Math.sin(ang) * len);
+    x.stroke();
+  }
+  x.restore();
+
+  x.save();                                  // flecks
+  for (let i = 0; i < 2200; i++) {
+    x.globalAlpha = 0.012 + r() * 0.03;
+    x.fillStyle = r() < 0.55 ? '#7d7362' : '#ffffff';
+    x.beginPath();
+    x.arc(r() * W, r() * W, 0.4 + r() * 1.0, 0, Math.PI * 2);
+    x.fill();
+  }
+  x.restore();
+  return c;
+}
+
+/* ── marks ────────────────────────────────────────────────────────────────── */
+
+/** A ring that is never a true circle: low-frequency wobble on the radius. */
+function ringPath(ctx, cx, cy, r, wob, amp) {
+  ctx.beginPath();
+  ringAt(ctx, cx, cy, r, wob, amp);
+}
+
+/** Ripple: grows past the frame corner in ~0.6s, thinning and fading. */
+function drawRipple(ctx, cue, t) {
+  const u = clamp((t - cue.start) / cue.dur, 0, 1);
+  if (u <= 0 || u >= 1) return;
+  const e = easeOutCubic(u);
+  let cx = CX, cy = CY;
+  if (cue.from) { const p = dotPos(t, cue.from); cx = p[0]; cy = p[1]; }
+  const bold = cue.bold || 1;
+  const r = lerp(DOT_R * 0.9, cue.maxR || CORNER * 1.15, e);
+  const alpha = (u < 0.08 ? u / 0.08 : 1) * (1 - easeInQuad(clamp((u - 0.45) / 0.55, 0, 1)));
+  const width = lerp(4.6 * bold, 1.15 * bold, e);
+  const wob = wobbler(cue.seed);
+
+  inkPass(ctx, cue.ink, { alpha }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineWidth = width;
+    g.lineJoin = 'round';
+    ringPath(g, cx, cy, r, wob, 0.010);
+    g.stroke();
+  });
+  drawTicks(ctx, cue, cx, cy, r, e, alpha);
+}
+
+/** Vibration ticks: 2-3 short parallel arcs flicking just outside the rim. */
+function drawTicks(ctx, cue, cx, cy, r, e, alpha) {
+  const tr = rngFor(cue.seed + ':tick');
+  const spots = [];
+  for (let i = 0, n = 1 + Math.floor(tr() * 2); i < n; i++) spots.push(tr() * Math.PI * 2);
+  inkPass(ctx, cue.ink, { alpha: alpha * 0.8 }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    for (const th of spots) {
+      for (let k = 0; k < 3; k++) {
+        const rr = r * (1.035 + k * 0.028);
+        const span = 0.05 - k * 0.011;
+        g.lineWidth = lerp(2.8, 0.9, e) * (1 - k * 0.18);
+        g.beginPath();
+        g.arc(cx, cy, rr, th - span, th + span);
+        g.stroke();
+      }
+    }
+  });
+}
+
+/** The spine: indigo, with a pink plate escaping on its lower-left. */
+function drawDotAt(ctx, x, y, mainInk, r, coreInk, fringeInk) {
+  // Solid marks can composite as vectors. Keeping a 24 px seed off the full
+  // canvas scratch plates avoids two 1080-square passes on every frame.
+  const fi = fringeInk || 'pink', wob = wobbler('dot:' + mainInk, 2);
+  const shape = (name, radius) => {
+    const p = new Path2D(), [ox, oy] = REG[name];
+    ringAt(p, x + ox, y + oy, Math.max(.001, radius), wob, .035, 48);
+    return p;
+  };
+  const main = shape(mainInk, r), fringe = shape(fi, r), inverse = new Path2D();
+  inverse.rect(x-r-10,y-r-10,r*2+20,r*2+20);inverse.addPath(main);
+  ctx.save();ctx.globalCompositeOperation='multiply';
+  ctx.save();ctx.clip(inverse,'evenodd');ctx.fillStyle=INK[fi];ctx.fill(fringe);ctx.restore();
+  ctx.fillStyle=INK[mainInk];
+  if(coreInk){
+    const core=shape(mainInk,r*.46),rim=new Path2D();rim.addPath(main);rim.addPath(core);
+    ctx.fill(rim,'evenodd');ctx.fillStyle=INK[coreInk];ctx.fill(core);
+  }else ctx.fill(main);
+  ctx.restore();
+}
+
+function drawDotThroughPlates(ctx, x, y, mainInk, r, coreInk, fringeInk) {
+  const fi = fringeInk || 'pink';
+  const wob = wobbler('dot:' + mainInk, 2);
+  const path = (g, rr, dx, dy) => {
+    g.beginPath();
+    ringAt(g, x + (dx || 0), y + (dy || 0), rr, wob, 0.035, 48);
+  };
+  // Only the crescent may print. Leaving a whole fringe disc under the dot works
+  // while the top ink is dark, but pink over yellow multiplies to orange across
+  // the entire dot -- so clear everything the main plate will cover.
+  // The offset comes from the two plates' registration alone.
+  const dx = REG[mainInk][0] - REG[fi][0], dy = REG[mainInk][1] - REG[fi][1];
+  inkPass(ctx, fi, {}, (g) => {
+    g.fillStyle = '#000';
+    path(g, r); g.fill();
+    g.globalCompositeOperation = 'destination-out';
+    path(g, r, dx, dy); g.fill();
+  });
+  inkPass(ctx, mainInk, {}, (g) => {
+    g.fillStyle = '#000';
+    path(g, r); g.fill();
+    if (coreInk) { g.globalCompositeOperation = 'destination-out'; path(g, r * 0.46); g.fill(); }
+  });
+  if (coreInk) {
+    inkPass(ctx, coreInk, {}, (g) => { g.fillStyle = '#000'; path(g, r * 0.46); g.fill(); });
+  }
+}
+
+function drawDot(ctx, t, scale = 1) {
+  drawDotAt(ctx, CX, CY, 'indigo', DOT_R * scale);
+}
+
+/* ── scene drawing helpers ────────────────────────────────────────────────────
+   Scenes draw coverage in 1080-space and alpha is tone, so 0.4 means a 40%
+   dot screen. Shape helpers carry hand wobble; nothing here is a true circle
+   or a straight line.                                                        */
+
+function makeWob(rng, harmonics = 3) {
+  const h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, rng() * 2 - 1, rng() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, a, p]) => s + a * Math.sin(k * th + p), 0) / harmonics;
+}
+
+const tone = (g, a) => { g.globalAlpha = clamp(a, 0, 1); };
+
+/** Append a wobbly ring to the current path. */
+function ringAt(g, cx, cy, r, wob, amp = 0.02, steps = 0) {
+  const n = steps || clamp(Math.round(r * 0.8), 40, 300);
+  for (let i = 0; i <= n; i++) {
+    const th = i / n * Math.PI * 2;
+    const rr = r * (1 + wob(th) * amp);
+    const x = cx + Math.cos(th) * rr, y = cy + Math.sin(th) * rr;
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.closePath();
+}
+
+function blob(g, cx, cy, r, rng, amp = 0.06) {
+  g.beginPath();
+  ringAt(g, cx, cy, r, makeWob(rng, 3), amp);
+}
+
+/** Hand-drawn polyline: wobbled control points, not a ruled edge. */
+function hand(g, pts, rng, amp = 2.5) {
+  g.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y] = pts[i];
+    const jx = x + (rng() - 0.5) * amp * 2, jy = y + (rng() - 0.5) * amp * 2;
+    i ? g.lineTo(jx, jy) : g.moveTo(jx, jy);
+  }
+}
+
+/** Concentric sound/light/water arcs — the motif that rhymes with the ripples. */
+function arcsFan(g, cx, cy, r0, dr, n, a0, a1, lw, rng) {
+  for (let i = 0; i < n; i++) {
+    g.lineWidth = lw * (1 - i * 0.12);
+    g.beginPath();
+    const r = r0 + i * dr, j = rng ? (rng() - 0.5) * 0.05 : 0;
+    g.arc(cx, cy, r, a0 + j, a1 + j);
+    g.stroke();
+  }
+}
+
+/* ── scene registry ───────────────────────────────────────────────────────── */
+
+const SCENES = {};
+const scene = (id, def) => { SCENES[id] = Object.assign({ id, live: null }, def); };
+
+const baked = new Map();
+
+/**
+ * Bake a scene to one opaque bitmap: every plate screened, tinted, offset and
+ * multiplied onto white, ready to multiply over paper.
+ *
+ * Baked at its display size, never scaled afterwards. Resampling a halftoned
+ * bitmap beats the dot grid against the pixel grid and moirés; real print
+ * screens at final size too.
+ */
+function bakeScene(id, size, swap) {
+  const key = id + '@' + size + (swap ? ':' + swap : '');
+  if (baked.has(key)) return baked.get(key);
+  const sc = SCENES[id];
+  const k = size / W;
+  const out = cv(size, size), o = out.getContext('2d');
+  o.fillStyle = '#fff';
+  o.fillRect(0, 0, size, size);
+
+  const cover = cv(size, size), g = cover.getContext('2d');
+  for (const ink of sc.inks) {
+    const plate = swap ? (SWAPS[swap][ink] || ink) : ink;
+    g.setTransform(k, 0, 0, k, 0, 0);
+    g.clearRect(0, 0, W, W);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.fillStyle = g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.save();
+    sc.plates(g, ink, rngFor(id + ':' + ink), rngFor(id + ':shape'));
+    g.restore();
+    starve(g, rngFor(id + ':' + ink + ':void'));
+
+    const dots = screenCoverage(cover, plate);
+    const tin = cv(size, size), tx = tin.getContext('2d');
+    tx.drawImage(dots, 0, 0);
+    tx.globalCompositeOperation = 'source-in';
+    tx.fillStyle = INK[plate];
+    tx.fillRect(0, 0, size, size);
+
+    const [rx, ry] = REG[plate];
+    o.save();
+    o.globalCompositeOperation = 'multiply';
+    o.drawImage(tin, rx, ry);
+    o.restore();
+  }
+  baked.set(key, out);
+  return out;
+}
+
+/**
+ * The archive's ink drain: re-print a baked scene as one blue plate, taken from
+ * its luminance so a bright area stays bright. Mapping every ink to blue instead
+ * would turn a yellow sky into solid dark.
+ */
+function bakeCyano(id, size) {
+  const key = 'cy:' + id + '@' + size;
+  if (baked.has(key)) return baked.get(key);
+  const src = bakeScene(id, size);
+  const c = cv(size, size), x = c.getContext('2d');
+  x.drawImage(src, 0, 0);
+  const img = x.getImageData(0, 0, size, size), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / 255;
+    d[i] = 0x00; d[i + 1] = 0x78; d[i + 2] = 0xBF;
+    d[i + 3] = Math.round((1 - lum) * 255);
+  }
+  x.putImageData(img, 0, 0);
+  baked.set(key, c);
+  return c;
+}
+
+/** Ink starvation: evenly filled solids read as laser print, so drop flecks. */
+function starve(g, rng) {
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'destination-out';
+  const w = g.canvas.width, n = Math.round(w * 1.1);
+  for (let i = 0; i < n; i++) {
+    g.globalAlpha = 0.2 + rng() * 0.55;
+    g.beginPath();
+    g.arc(rng() * w, rng() * w, 0.5 + rng() * 2.0, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.restore();
+}
+
+
+/* ── craft kit ────────────────────────────────────────────────────────────────
+   Drawing vocabulary for scene plates. Copy this whole block into a new film,
+   between starve() and the scenes.
+
+   Shapes are Path2D values rather than marks on the context, so one shape can
+   be filled on one plate, knocked out of another and hatched on a third. That
+   is what plate discipline needs, and it removes the usual trap of rebuilding
+   a shape per ink and having the knockout miss.
+
+   Everything draws coverage in 1080-space: fill style is already '#000' and
+   globalAlpha is tone, so 0.4 means a 40% dot screen.                        */
+
+const TAU = Math.PI * 2;
+
+/* — shape builders ——————————————————————————————————————————————— */
+
+/** Catmull-Rom through pts, as a dense polyline. */
+function curve(pts, closed, per) {
+  per = per || 12;
+  const n = pts.length, out = [];
+  const at = (i) => pts[closed ? (i + n * 2) % n : clamp(i, 0, n - 1)];
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+    for (let k = 0; k < per; k++) {
+      const u = k / per, u2 = u * u, u3 = u2 * u;
+      out.push([
+        0.5 * (2 * p1[0] + (p2[0] - p0[0]) * u + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2
+               + (3 * p1[0] - p0[0] - 3 * p2[0] + p3[0]) * u3),
+        0.5 * (2 * p1[1] + (p2[1] - p0[1]) * u + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2
+               + (3 * p1[1] - p0[1] - 3 * p2[1] + p3[1]) * u3),
+      ]);
+    }
+  }
+  if (!closed) out.push(pts[n - 1].slice());
+  return out;
+}
+
+/** Points around an ellipse, for feeding cut(). */
+function ringPts(x, y, rx, ry, n, rot) {
+  const out = [], c = Math.cos(rot || 0), s = Math.sin(rot || 0);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU, px = Math.cos(th) * rx, py = Math.sin(th) * ry;
+    out.push([x + px * c - py * s, y + px * s + py * c]);
+  }
+  return out;
+}
+
+/**
+ * Closed hand-cut contour through control points: the silhouette builder.
+ * A shape made of arcs and ellipses reads as clip art however good the screen
+ * is, because every edge has the same machine curvature.
+ *   o.amp   edge waver in px — 2 is a drawn line, 8 is torn stock
+ *   o.tear  0..1 chance per sample of a deeper bite inward
+ */
+function cut(pts, rng, o) {
+  o = o || {};
+  const amp = o.amp === undefined ? 3 : o.amp, tear = o.tear || 0;
+  const c = curve(pts, true, o.per || 10), n = c.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = c[i], b = c[(i + 1) % n];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  const sgn = area > 0 ? 1 : -1;            // keep the normal pointing outward
+
+  /* Displace along the normal, then smooth: an unsmoothed tear lands on one
+     sample and reads as damage rather than as a bay in the edge. */
+  const w1 = makeWob(rng, 4), w2 = makeWob(rng, 9), d = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU;
+    d[i] = (w1(th) + w2(th * 3) * 0.3) * amp;
+    if (tear && rng() < tear) d[i] -= amp * (1.4 + rng() * 1.6);
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const s = Float32Array.from(d);
+    for (let i = 0; i < n; i++) d[i] = (s[(i - 1 + n) % n] + s[i] * 2 + s[(i + 1) % n]) * 0.25;
+  }
+
+  const p = new Path2D();
+  for (let i = 0; i < n; i++) {
+    const a = c[(i - 1 + n) % n], b = c[(i + 1) % n];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const x = c[i][0] + sgn * ty * d[i], y = c[i][1] - sgn * tx * d[i];
+    i ? p.lineTo(x, y) : p.moveTo(x, y);
+  }
+  p.closePath();
+  return p;
+}
+
+/**
+ * Variable-width ribbon along a path, as a fillable shape. Canvas has no
+ * pressure, so a constant lineWidth is the default and it is what makes stems,
+ * branches, whiskers and rigging read as wire. wfn(u) returns half-width.
+ */
+function nib(pts, wfn, o) {
+  o = o || {};
+  const c = o.raw ? pts : curve(pts, false, o.per || 10);
+  const n = c.length, L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const w = Math.max(0.01, wfn(i / (n - 1)));
+    L.push([c[i][0] - ty * w, c[i][1] + tx * w]);
+    R.push([c[i][0] + ty * w, c[i][1] - tx * w]);
+  }
+  const p = new Path2D();
+  p.moveTo(L[0][0], L[0][1]);
+  for (let i = 1; i < n; i++) p.lineTo(L[i][0], L[i][1]);
+  for (let i = n - 1; i >= 0; i--) p.lineTo(R[i][0], R[i][1]);
+  p.closePath();
+  return p;
+}
+
+/** Width profiles for nib(). */
+const wTip = (w) => (u) => w * (1 - u * u);                       // full, lifting to a point
+const wSwell = (w, at, k) => (u) => w * Math.exp(-Math.pow((u - at) / (k || 0.35), 2));
+const wLeaf = (w, skew) => (u) => w * Math.pow(Math.sin(Math.PI * Math.pow(u, skew || 0.55)), 1.15);
+
+/**
+ * Calligraphic width from a held nib: widest where the path runs across the
+ * nib's axis, thinnest where it runs along it. This is where hand-drawn line
+ * weight comes from, and it is what makes a contour read as drawn rather than
+ * traced. Pass the same polyline you give nib(), with raw: true.
+ */
+function wNib(c, w0, ang, floor) {
+  const n = c.length, f = floor === undefined ? 0.22 : floor;
+  return (u) => {
+    const i = clamp(Math.round(u * (n - 1)), 0, n - 1);
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    const th = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    return w0 * (f + (1 - f) * Math.abs(Math.sin(th - ang)));
+  };
+}
+
+/**
+ * A horizon band closed to the bottom of the frame: hills, treeline, roofline,
+ * wave. Stack several at falling tone and the air between them reads as depth.
+ *   o.amp  height of the undulation   o.freq  how many bumps across the frame
+ *   o.tilt fraction of W the far end drops   o.teeth adds a jagged octave
+ */
+function ridgeAt(y, o) {
+  const amp = o.amp === undefined ? 60 : o.amp;
+  const w = makeWob(o.rng, o.harm || 5), t = o.teeth ? makeWob(o.rng, 7) : null;
+  return (u) => y + w(u * (o.freq || 5)) * amp + (o.tilt || 0) * (u - 0.5) * W
+                + (t ? t(u * 37) * amp * 0.22 : 0);
+}
+
+/**
+ * Mountain profile: overlapping triangular peaks with a jagged octave on top,
+ * because a skyline built from smooth harmonics always reads as hills however
+ * tall it is. Same u -> y contract as ridgeAt, so ridge() takes either.
+ */
+function peaksAt(y, o) {
+  const amp = o.amp === undefined ? 90 : o.amp, n = o.n || 5, ps = [];
+  for (let i = 0; i < n; i++) {
+    ps.push({ c: (i + 0.5) / n + (o.rng() - 0.5) * 0.7 / n,
+              h: amp * (0.4 + o.rng() * 0.6), w: (0.55 + o.rng() * 0.9) / n,
+              lean: (o.rng() - 0.5) * 0.7 });
+  }
+  const jag = makeWob(o.rng, 8);
+  return (u) => {
+    let top = y;
+    for (const p of ps) {
+      const d = (u - p.c) / p.w;
+      const yy = y - p.h * Math.max(0, 1 - Math.abs(d)) * (1 + p.lean * (d > 0 ? 1 : -1));
+      if (yy < top) top = yy;
+    }
+    return top + jag(u * 26) * amp * 0.06;
+  };
+}
+
+/** x across the frame -> the u that ridgeAt takes, for planting on a skyline. */
+const ridgeU = (x) => (x + 60) / (W + 120);
+
+function ridge(y, o) {
+  o = o || {};
+  const f = typeof y === 'function' ? y : ridgeAt(y, o);
+  const n = o.n || 120, p = new Path2D();
+  p.moveTo(-60, W + 60);
+  for (let i = 0; i <= n; i++) p.lineTo(-60 + i / n * (W + 120), f(i / n));
+  p.lineTo(W + 60, W + 60);
+  p.closePath();
+  return p;
+}
+
+/* — paint operations ————————————————————————————————————————————— */
+
+/** Fill a shape at a tone. */
+function print(g, path, a) { tone(g, a === undefined ? 1 : a); g.fill(path); }
+
+/** Knock a shape out of the plate underneath it, at full coverage.
+    A knockout drawn at a tone leaves the screen's gaps behind, so the plate
+    below shows through the holes — always clear solid. */
+function carve(g, path) {
+  g.save();
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'destination-out';
+  g.fill(path);
+  g.restore();
+}
+
+/**
+ * Print a shape at an exact tone, clearing whatever the plate already holds
+ * beneath it. Tones on one plate add where they overlap, so a stack of ridges
+ * drawn back to front ends up solid at the bottom of the frame — which looks
+ * like a colour band rather than land. Every plane in a depth stack goes
+ * through here.
+ */
+function plane(g, path, a) { carve(g, path); print(g, path, a); }
+
+/** Outline a shape. Line work fades on width and alpha, never on coverage. */
+function keyline(g, path, w, a) {
+  tone(g, a === undefined ? 1 : a);
+  g.lineWidth = w === undefined ? 3 : w;
+  g.stroke(path);
+}
+
+/**
+ * Tone ramp inside a shape — a coverage gradient, which the screen turns into
+ * a dot-size ramp. This is the signature riso gesture and neither film uses it.
+ * Baked plates only: a live inkPass screens at one flat coverage, so a gradient
+ * there prints smooth, which is the thing the brief forbids.
+ *   o.stops  [[at, tone], ...]      o.x0,y0,x1,y1  linear
+ *   o.x,y,r0,r  radial
+ */
+function shade(g, path, o) {
+  g.save();
+  if (path) g.clip(path);
+  const grd = o.r !== undefined
+    ? g.createRadialGradient(o.x, o.y, o.r0 || 0, o.x, o.y, o.r)
+    : g.createLinearGradient(o.x0, o.y0, o.x1, o.y1);
+  for (const [at, a] of o.stops) grd.addColorStop(clamp(at, 0, 1), 'rgba(0,0,0,' + clamp(a, 0, 1) + ')');
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.globalAlpha = 1;
+  g.fillStyle = grd;
+  g.fillRect(-W, -W, W * 3, W * 3);
+  g.restore();
+}
+
+/**
+ * Parallel hatching clipped to a shape: tone made of line rather than dot.
+ * Next to the screen it reads as engraving, and it is how a mid-value stops
+ * being flat without adding another ink.
+ *   o.gap px between lines   o.w width   o.ang radians   o.a tone
+ *   o.fade(u) 0..1 thins across the run, for a shaded edge
+ *   o.cut hatches into the knockout instead, which is dry-brush at gap 3-5
+ */
+function hatch(g, path, rng, o) {
+  o = o || {};
+  const gap = o.gap || 10, span = W * 1.6;
+  const w = o.w || 2.2, a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (path) g.clip(path);
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.translate(CX, CY); g.rotate(o.ang === undefined ? -0.5 : o.ang); g.translate(-CX, -CY);
+  g.lineCap = 'round';
+  const n = Math.ceil(span * 2 / gap);
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1), f = o.fade ? clamp(o.fade(u), 0, 1) : 1;
+    if (f <= 0.02) continue;
+    g.globalAlpha = a * f;
+    g.lineWidth = w * (0.72 + rng() * 0.5) * clamp(f, 0.3, 1);
+    const y = CY - span + i * gap + (rng() - 0.5) * gap * 0.3;
+    g.beginPath();
+    for (let k = 0; k <= 7; k++) {
+      const x = CX - span + span * 2 * k / 7, yy = y + (rng() - 0.5) * 2.4;
+      k ? g.lineTo(x, yy) : g.moveTo(x, yy);
+    }
+    g.stroke();
+  }
+  g.restore();
+}
+
+/**
+ * Stipple inside a shape — a gradient made of grain instead of dots, for
+ * spray, mist, sand, snow, and the bloom where ink feathers at an edge.
+ * o.density(x, y) returns 0..1 and is the whole point: without it this is noise.
+ */
+function spray(g, path, rng, o) {
+  o = o || {};
+  const n = o.n || 900, r0 = o.r0 || 0.8, r1 = o.r1 || 3.0;
+  const b = o.box || [0, 0, W, W], a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < n; i++) {
+    const x = b[0] + rng() * b[2], y = b[1] + rng() * b[3];
+    const d = o.density ? o.density(x, y) : 1;
+    const keep = rng() < d, rr = r0 + rng() * (r1 - r0), av = 0.45 + rng() * 0.55;
+    if (!keep || (path && !g.isPointInPath(path, x, y))) continue;
+    g.globalAlpha = a * av;
+    g.beginPath();
+    g.arc(x, y, rr, 0, TAU);
+    g.fill();
+  }
+  g.restore();
+}
+
+/* There is no model() helper here on purpose. Shading a form by laying a second
+   ink across its shade side is the obvious move and it is wrong: study 3 in that
+   form printed an orange ball olive-brown. Model with shade(…, {cut: true}) on
+   the subject's own plate instead, and spend a second ink only on the smallest
+   darkest accent. */
+
+/** Contact shadow. A subject that does not touch its ground reads as a decal. */
+function bed(g, x, y, rx, ry, rng, a) {
+  const t = a === undefined ? 0.55 : a;
+  shade(g, cut(ringPts(x, y, rx, ry, 10), rng, { amp: rx * 0.06 }),
+        { x: x, y: y, r0: 0, r: rx, stops: [[0, t], [0.5, t * 0.5], [1, 0]] });
+}
+
+/* ── motion kit ───────────────────────────────────────────────────────────────
+   How a scene behaves, as against how it is drawn. Copy this block into a film
+   after the craft kit; it depends on clamp, lerp, cv, W, TAU, INK, REG, paper,
+   dotPattern and wobbler.
+
+   Two constraints shape everything in it:
+   - A frame is a pure function of t. State carried between frames breaks the
+     contract and verify.mjs catches it; an rng drawn per frame does not break
+     the contract, is not caught, and makes texture crawl. Vary in t, not in
+     frame count — wander() is the primitive for it.
+   - A live element screens at one flat coverage, so shade() cannot reach it.
+     Spatial tone on something that moves is bandPass().                      */
+
+/** Local 0..1 for an event at t0 lasting dur. Every timed thing starts here. */
+const phase = (t, t0, dur) => clamp((t - t0) / dur, 0, 1);
+
+/**
+ * Quantise time onto a step grid. Interpolated motion reads as a tween; held
+ * frames read as drawn animation, which is what the printed idiom wants — 1/12
+ * is on twos, and cuts and scene changes belong on the 0.25/0.5 s grid.
+ */
+const hold = (t, step) => Math.floor(t / step + 1e-9) * step;
+
+/* There is no easeInBack here on purpose. Anticipation staged as an easing
+   curve on the travel is a shape sliding backwards; study 10 got it by giving
+   the bird a crouch to hold and a branch to load, which is a pose and a phase,
+   not a curve. Reach for a curve only once the pose exists. */
+const easeOutQuad = (u) => 1 - (1 - u) * (1 - u);   // thrown: leaves fast, then coasts
+
+/**
+ * Mass arriving somewhere and ringing down. Anything with weight that stops
+ * against something — a lid, a released branch, a landed bird, a float — rings
+ * past its rest and comes back. easeOutCubic merely decelerates, which reads as
+ * a machine parking, and is the wrong default for everything that has weight.
+ *   o.bounces  half-cycles before rest: 1 a heavy lid, 2 a branch, 3 a whisker
+ *   o.damp     higher is stiffer
+ */
+function settle(u, o) {
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  o = o || {};
+  const n = o.bounces === undefined ? 2 : o.bounces, k = o.damp === undefined ? 5 : o.damp;
+  const f = (x) => 1 - Math.exp(-k * x) * Math.cos(n * Math.PI * x);
+  return f(u) + (1 - f(1)) * u;                  // land exactly on 1
+}
+
+/**
+ * Deterministic wander in t: one sine stack sampled at t, never a fresh rng
+ * draw per frame. This is what lets a flame, a flag or a water surface vary
+ * without crawling. Periodic with period 1/hz, so anything driven by it loops
+ * seamlessly; give separate parts separate keys or they all breathe together.
+ */
+const wander = (key, hz, harmonics) => {
+  const w = wobbler(key, harmonics || 3);
+  return (t) => w(TAU * hz * t);
+};
+
+const scratch2 = cv(W, W), s2x = scratch2.getContext('2d');
+
+/**
+ * Spatial tone on a live element. inkPass screens a whole pass at one flat
+ * coverage: a gradient drawn into it survives as dots of constant size at
+ * varying opacity, which prints as smooth ink — the one thing this look cannot
+ * afford. Bands give the dot ramp back. Each band is its own quantised
+ * coverage, so the dot itself steps up across the form.
+ *
+ * bands are [{coverage, draw(g)}, …], lightest first, each one a region rather
+ * than a gradient. A band clears what earlier bands left where it lands,
+ * because two screens overlapping print denser than either — the same reason
+ * plane() exists for baked plates. A band at coverage 0 is therefore a
+ * knockout, which is how a live highlight gets back to bare paper.
+ *
+ * Four steps read as a ramp at 1080. dotPattern quantises to 1/16, so steps
+ * closer than 0.06 apart are the same band drawn twice. Each band costs one
+ * full-canvas pattern fill, so this is for the one element in the frame that is
+ * both moving and modelled, not for everything that moves.
+ */
+function bandPass(ctx, name, opts, bands) {
+  opts = opts || {};
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+
+  for (const b of bands) {
+    // Path bands clear and screen in one scratch surface. The drawing callback
+    // route remains for bands with arbitrary masks or drawing operations.
+    if(b.path){
+      const c=clamp(b.coverage===undefined?1:b.coverage,0,1);
+      sx.save();if(b.clipPath)sx.clip(b.clipPath);
+      sx.globalCompositeOperation='destination-out';sx.fillStyle='#000';sx.fill(b.path);
+      if(c>.001){sx.globalCompositeOperation='source-over';sx.fillStyle=c<1?dotPattern(sx,name,c):'#000';sx.fill(b.path);}
+      sx.restore();continue;
+    }
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.lineCap = 'round';
+    s2x.lineJoin = 'round';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+
+    sx.save();                                   // this band owns its value
+    sx.globalCompositeOperation = 'destination-out';
+    sx.drawImage(scratch2, 0, 0);
+    sx.restore();
+
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    if (c < 1) {
+      s2x.save();
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+      s2x.restore();
+    }
+    sx.drawImage(scratch2, 0, 0);
+  }
+
+  sx.save();
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/**
+ * Put paper back under a live light. Every live pass multiplies, so a bright
+ * moving element over a printed night can only get brighter by taking the night
+ * away first; a pale ink screened straight over it prints mud.
+ *
+ * The opening is banded for the same reason ink is: a soft-edged mask fades the
+ * night's dots in opacity instead of shrinking them, which is smooth ink by
+ * another route. Bands here union rather than accumulate — dotPattern grows one
+ * dot grid, so a lower coverage is a subset of a higher one — and name picks
+ * which screen the opening is cut on. Use the screen of the ink about to print
+ * over it, or the two grids beat.
+ *
+ * relight puts paper back over everything already in the frame, baked included.
+ * Anything inside the opening that must survive is drawn after it.
+ */
+function relight(ctx, name, bands) {
+  for (const b of bands) {
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+    if (c < 1) {
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+    }
+    s2x.globalCompositeOperation = 'source-in';
+    s2x.drawImage(paper, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(scratch2, 0, 0);
+    ctx.restore();
+  }
+}
+
+
+/* Lumen's scene library. All contours shared by plates are built before ink branches. */
+const WORLD_IDS=['husk','sail','moth','tide','garden','furnace','canopy','eclipse'];
+function pathOf(pts,key,amp=2.2){return cut(pts,rngFor(key),{amp});}
+function discPath(x,y,r){const p=new Path2D();p.arc(x,y,Math.max(.01,r),0,TAU);return p;}
+function strokePath(pts,width){return nib(pts,wSwell(width,.5,.65));}
+function fillPaths(g,paths){g.fillStyle='#000';for(const p of paths)g.fill(p);}
+function unionPaths(paths){const p=new Path2D();for(const part of paths)p.addPath(part);return p;}
+function directInk(ctx,name,path,coverage=1,alpha=1){
+  ctx.save();ctx.globalCompositeOperation='multiply';ctx.globalAlpha=alpha;ctx.translate(...REG[name]);
+  if(coverage>=1)ctx.fillStyle=INK[name];
+  else{
+    const sc=screenOf(name),q=clamp(Math.round(coverage*16),0,16);sc.colored=sc.colored||new Map();
+    if(!sc.colored.has(q)){
+      dotPattern(ctx,name,coverage);const tile=cv(sc.S,sc.S),g=tile.getContext('2d');
+      g.drawImage(sc.patterns.get(q),0,0);g.globalCompositeOperation='source-in';g.fillStyle=INK[name];g.fillRect(0,0,sc.S,sc.S);sc.colored.set(q,tile);
+    }
+    ctx.fillStyle=ctx.createPattern(sc.colored.get(q),'repeat');
+  }
+  ctx.fill(path);ctx.restore();
+}
+function paperShape(ctx,path){ctx.save();ctx.clip(path);ctx.drawImage(paper,0,0);ctx.restore();}
+function arcPts(x,y,rx,ry,a,b,n=50){return Array.from({length:n},(_,i)=>{const q=lerp(a,b,i/(n-1));return[x+rx*Math.cos(q),y+ry*Math.sin(q)];});}
+function grainStars(g,rng,count,box=[0,0,W,W]){g.save();for(let i=0;i<count;i++){
+  const x=box[0]+rng()*box[2],y=box[1]+rng()*box[3],r=.5+rng()*1.6;
+  tone(g,.25+rng()*.7);g.beginPath();g.arc(x,y,r,0,TAU);g.fill();}g.restore();}
+function petal(x,y,a,len,width,curl,key){
+  const ca=Math.cos(a),sa=Math.sin(a);
+  const pts=[[0,0],[len*.22,-width*.62],[len*.57,-width],[len*.87,-width*.48+curl*.3],
+    [len,curl],[len*.85,width*.4+curl*.85],[len*.5,width*.57],[len*.17,width*.24]];
+  return pathOf(pts.map(([u,v])=>[x+u*ca-v*sa,y+u*sa+v*ca]),key,2);
+}
+
+scene('husk',{
+  inks:['orange','pink','indigo'],
+  plates(g,ink,rng,sr){
+    const shell=pathOf([[654,161],[663,294],[739,472],[703,632],[593,793],[429,920],
+      [433,807],[351,640],[357,460],[456,292]],'husk:outer',3.4);
+    const seam=pathOf([[648,180],[591,362],[562,453],[551,526],[577,602],[501,777],
+      [437,893],[494,699],[523,585],[512,491],[555,350]],'husk:seam');
+    const crease=nib([[649,187],[592,354],[566,445],[540,540],[560,603],[497,771],[437,897]],wSwell(12,.55,.36));
+    if(ink==='orange'){
+      print(g,shell,1);shade(g,shell,{x0:340,y0:450,x1:720,y1:530,cut:true,stops:[[0,.05],[.35,.25],[.7,.88],[1,.2]]});
+      hatch(g,shell,rng,{ang:-.7,gap:13,w:1.7,cut:true,a:.5});carve(g,seam);
+      for(let i=0;i<7;i++){
+        const pts=[[461+i*20,301+i*9],[400+i*34,480],[419+i*23,680],[455+i*12,787]];
+        carve(g,nib(pts,wSwell(1.6,.45,.4)));
+      }
+    }
+    if(ink==='pink'){
+      print(g,crease,.9);carve(g,seam);
+      shade(g,null,{x:540,y:540,r:140,stops:[[0,.22],[.3,.1],[1,0]]});
+      carve(g,shell); // pink light belongs in the opening, not on the orange husk
+      print(g,nib([[549,524],[602,390],[677,319]],wTip(2)),.8);
+    }
+    if(ink==='indigo'){
+      print(g,crease,.9);carve(g,seam);
+      print(g,nib([[366,466],[369,605],[423,754],[434,849]],wSwell(5,.5,.5)),.85);
+      print(g,nib([[642,180],[658,272],[685,354]],wTip(3)),.8);
+    }
+  },
+  live(ctx,u){
+    const th=u*TAU;
+    inkPass(ctx,'pink',{alpha:.65},g=>{
+      fillPaths(g,[nib([[540,540],[568+Math.sin(th)*12,487],[603+Math.sin(th-1)*25,439],[620+Math.sin(th-2)*22,399]],wTip(2.2))]);
+      for(let i=0;i<5;i++){const v=(u*.45+i*.2)%1;
+        g.beginPath();g.arc(540+Math.sin(v*4+i)*38,540-v*180,1.2+v*1.7,0,TAU);g.fill();}
+    });
+  }
+});
+
+function sailShape(u,w=1,offset=0){
+  const swing=Math.sin(u*TAU)*46,lag=Math.sin(u*TAU-1.3)*60;
+  return nib([[-190,1040+lag],[95,889],[312,700+swing*.35],[493,548+offset],
+    [596,421+offset],[736,253+swing],[984,195+lag],[1230,261+lag*.5]],
+    v=>w*(12+142*Math.pow(Math.sin(Math.PI*v),1.4)),{per:20});
+}
+scene('sail',{
+  inks:['blue'],
+  plates(g,ink,rng){
+    shade(g,null,{x0:0,y0:0,x1:1080,y1:1080,stops:[[0,.03],[.6,.12],[1,.25]]});
+    for(let i=0;i<12;i++){
+      print(g,nib([[-100,230+i*55],[230,170+i*66],[620,166+i*68],[1140,400+i*48]],wSwell(.8,.5,.9)),.17);
+    }
+  },
+  live(ctx,u){
+    const shape=sailShape(u);
+    paperShape(ctx,shape);
+    bandPass(ctx,'pink',{},[
+      {coverage:.25,path:shape},
+      {coverage:.5,path:sailShape(u,.77,32),clipPath:shape},
+      {coverage:.81,path:sailShape(u,.48,47),clipPath:shape},
+      {coverage:1,path:sailShape(u,.18,53),clipPath:shape}
+    ]);
+    inkPass(ctx,'indigo',{},g=>{
+      const bend=Math.sin(u*TAU)*17;
+      g.fill(nib([[343,692],[461,601],[535,533],[596,422],[649,356+bend]],wSwell(10,.52,.31)));
+      g.fill(nib([[212,789],[400,653],[505,565]],wTip(2)));
+    });
+    inkPass(ctx,'pink',{alpha:.65},g=>{
+      for(let k=0;k<3;k++)g.fill(nib([[717,296+k*12],[891,276+Math.sin(u*TAU-1)*54+k*22],
+        [1100,327+Math.sin(u*TAU-2)*50+k*34]],wTip(2-k*.4)));
+    });
+  }
+});
+
+function mothParts(u){
+  const flex=.88+.1*Math.sin(u*TAU-1),parts=[],veins=[],eyes=[];
+  for(const s of [-1,1]){
+    const f=flex+(s===1?.04:0),map=([x,y])=>[540+s*x*f,540+y+(x/500)*Math.sin(u*TAU+s*.3)*24];
+    const upper=[[0,0],[78,-100],[229,-258],[401,-333],[507,-322],[466,-203],[415,-85],[274,28],[103,57]];
+    const lower=[[14,14],[166,-4],[340,79],[370,193],[317,243],[194,223],[230,422],[196,413],[99,256],[31,148]];
+    parts.push(pathOf(upper.map(map),'moth:upper'+s,3),pathOf(lower.map(map),'moth:lower'+s,2.5));
+    for(let i=0;i<7;i++){
+      const v=i/6;
+      veins.push(nib([[19,9],[103+v*24,-64+v*58],[212+v*78,-164+v*106],[419-v*72,-287+v*223]].map(map),wTip(2.7)));
+    }
+    eyes.push(pathOf(ringPts(...map([281,-100]),29,42,10,s*.6),'eye'+s));
+  }
+  return{parts,veins,eyes};
+}
+scene('moth',{
+  inks:['blue','yellow'],
+  plates(g,ink,rng){
+    if(ink==='blue')shade(g,null,{x:540,y:540,r:740,stops:[[0,0],[.48,.01],[1,.16]]});
+    if(ink==='yellow'){
+      shade(g,null,{x:540,y:500,r:320,stops:[[0,.25],[.38,.07],[1,0]]});
+      grainStars(g,rng,65);
+    }
+  },
+  live(ctx,u){
+    const {parts,veins,eyes}=mothParts(u),all=new Path2D();parts.forEach(p=>all.addPath(p));
+    const inset=k=>{const p=new Path2D();p.addPath(all,new DOMMatrix().translate(540,540).scale(k).translate(-540,-540));return p;};
+    paperShape(ctx,all);
+    bandPass(ctx,'blue',{},[
+      {coverage:.28,path:all},
+      {coverage:.5,path:inset(.84),clipPath:all},
+      {coverage:.72,path:inset(.66),clipPath:all},
+      {coverage:.95,path:inset(.36),clipPath:all},
+      {coverage:0,path:unionPaths(veins.concat(eyes))}
+    ]);
+    inkPass(ctx,'indigo',{},g=>{
+      g.save();g.clip(all);g.fill(inset(.18));g.restore();
+      g.fill(nib([[539,485],[535,544],[546,625],[541,690]],wSwell(13,.4,.5)));
+      g.fill(nib([[536,500],[505,463],[490,428]],wTip(2.7)));
+      g.fill(nib([[546,500],[580,463],[590,423]],wTip(2.7)));
+      for(const p of eyes){g.lineWidth=4;g.stroke(p);}
+    });
+    inkPass(ctx,'yellow',{},g=>fillPaths(g,eyes));
+  }
+});
+
+scene('tide',{
+  inks:['blue','indigo','pink'],
+  plates(g,ink,rng,sr){
+    const wave=pathOf([[-80,1130],[-80,452],[122,270],[427,143],[781,124],[1060,268],
+      [1200,513],[1169,797],[1015,750],[920,502],[756,366],[600,370],[460,456],[409,576],
+      [459,726],[661,894],[916,970],[1140,984],[1140,1130]],'tide:mass',4);
+    const trough=pathOf([[-60,753],[158,737],[350,806],[579,947],[891,1042],[1150,1030],
+      [1150,1160],[-60,1160]],'tide:trough',3);
+    const foam=nib([[-80,476],[180,269],[489,177],[785,184],[999,322],[1091,502]],v=>8+13*Math.sin(Math.PI*v));
+    if(ink==='blue'){
+      shade(g,null,{x0:0,y0:50,x1:0,y1:960,stops:[[0,.18],[.55,0],[1,.06]]});
+      plane(g,wave,1);shade(g,wave,{x0:220,y0:240,x1:750,y1:980,cut:true,stops:[[0,.64],[.35,.12],[.7,0],[1,.1]]});
+      print(g,trough,1);carve(g,foam);
+      for(let i=0;i<27;i++){
+        const z=i/26;
+        const line=nib([[-80,536+z*210],[148,352+z*260],[410,265+z*77],[737,248+z*60],
+          [965,431+z*36],[1000+z*94,626+z*80]],wSwell(1.25+z,.42,.6));
+        carve(g,line);
+      }
+    }
+    if(ink==='indigo'){
+      print(g,trough,.86);shade(g,trough,{x0:0,y0:790,x1:0,y1:1100,cut:true,stops:[[0,.85],[.5,.14],[1,0]]});
+      print(g,nib([[949,513],[981,630],[1031,728],[1114,742]],wSwell(13,.6,.4)),.9);
+    }
+    if(ink==='pink'){
+      print(g,nib([[483,580],[541,595],[600,573],[669,557],[718,570]],wSwell(3,.4,.7)),.7);
+    }
+  },
+  live(ctx,u){
+    // Recycling a visible carrier teleports a whole curve. Both the value and
+    // slope of this envelope reach zero at the wrap, keeping the loop smooth.
+    const envelope=v=>{
+      const a=clamp(v/.2,0,1),b=clamp((1-v)/.2,0,1);
+      return a*a*(3-2*a)*b*b*(3-2*b);
+    };
+    inkPass(ctx,'blue',{alpha:.6},g=>{
+      for(let i=0;i<5;i++){
+        const v=(u*.5+i/5)%1,strength=envelope(v);
+        g.globalAlpha=strength;
+        g.fill(nib([[419+v*35,579+v*45],[502+v*70,701+v*42],[704+v*50,826+v*47],[930+v*70,860+v*62]],wTip(2.5*strength)));
+      }
+    });
+    inkPass(ctx,'blue',{alpha:.65},g=>{
+      for(let i=0;i<16;i++){const r=rngFor('spray'+i),v=(u*.4+r())%1;
+        const strength=envelope(v);g.globalAlpha=strength;
+        const x=730+r()*315+v*65,y=240+r()*165-v*80;
+        g.fill(nib([[x,y],[x+8+v*9,y+12+v*14]],wTip((1.2+r())*strength)));}
+    });
+  }
+});
+
+scene('garden',{
+  inks:['pink','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const soil=pathOf([[447,844],[485,831],[525,825],[572,829],[631,852],[610,867],[513,865]],'garden:soil',2);
+    const stem=nib([[536,839],[538,769],[525,707],[548,662]],wSwell(3.8,.45,.8));
+    const leaves=[petal(537,790,3.65,83,23,-20,'g:l1'),petal(532,751,-.55,65,18,15,'g:l2')];
+    const petals=Array.from({length:5},(_,i)=>petal(548,662,-Math.PI+i*.6,66,22,-5,'g:p'+i));
+    if(ink==='indigo'){
+      print(g,soil,.9);print(g,stem,1);leaves.forEach(p=>print(g,p,.85));
+      print(g,discPath(548,662,8),1);
+      for(let i=0;i<7;i++)print(g,nib([[475+i*17,847],[479+i*17,874+rng()*23]],wTip(1.8)),.5);
+    }
+    if(ink==='orange')print(g,soil,.9);
+    if(ink==='pink'){
+      for(const p of petals){print(g,p,.86);shade(g,p,{x:548,y:662,r:72,cut:true,stops:[[0,0],[.5,.1],[1,.9]]});}
+      print(g,discPath(548,662,6),.9);
+      print(g,nib([[535,835],[563,838],[609,846]],wTip(1.2)),.9);
+    }
+  },
+  live(ctx,u){
+    inkPass(ctx,'pink',{},g=>{
+      const v=u*1.6;
+      for(let i=0;i<7;i++){
+        const q=(v+i/7)%1,x=546+Math.sin(q*5+i*.8)*q*64,y=644-q*194;
+        g.fill(nib([[x,y],[x+Math.sin(q*6)*8,y-8-q*4]],wTip(1.8)));
+      }
+    });
+  }
+});
+
+scene('furnace',{
+  inks:['orange','yellow','indigo'],
+  plates(g,ink,rng,sr){
+    const lobes=[];for(let i=0;i<7;i++)lobes.push(petal(540,540,i*TAU/7+.2,890,205,160,'furnace'+i));
+    const hole=pathOf([[480,353],[601,372],[679,469],[670,577],[577,671],[450,631],[391,518]],'f:hole',4);
+    const core=discPath(540,540,80);
+    if(ink==='yellow'){
+      shade(g,null,{x:520,y:500,r:760,stops:[[0,0],[.15,.28],[.4,.85],[1,.3]]});
+      lobes.forEach(p=>carve(g,p));
+      shade(g,hole,{x:540,y:540,r:230,stops:[[0,0],[.24,.1],[.9,.8],[1,1]]});
+    }
+    if(ink==='orange'){
+      for(let i=0;i<lobes.length;i++){
+        const p=lobes[i];plane(g,p,.95);
+        shade(g,p,{x:510,y:485,r:750,cut:true,stops:[[0,.98],[.28,.92],[.5,.57],[.82,.08],[1,0]]});
+        const a=i*TAU/7+.2;
+        for(let j=0;j<8;j++){
+          const line=arcPts(540+Math.cos(a)*200,540+Math.sin(a)*200,220+j*27,110+j*25,a-.9,a+1.7,32);
+          g.save();g.clip(p);carve(g,nib(line,wSwell(1.6,.5,.5),{raw:true}));g.restore();
+        }
+      }
+      carve(g,hole);
+    }
+    if(ink==='indigo'){
+      for(let i=0;i<7;i++){
+        const a=i*TAU/7+.2;
+        const pts=[[540+Math.cos(a)*490,540+Math.sin(a)*490],[540+Math.cos(a+.05)*690,540+Math.sin(a+.05)*690],
+          [540+Math.cos(a+.2)*1050,540+Math.sin(a+.2)*1050]];
+        print(g,nib(pts,wSwell(65,.7,.5)),.9);
+      }
+      carve(g,hole);
+    }
+  },
+  live(ctx,u){
+    inkPass(ctx,'orange',{alpha:.8},g=>{
+      for(let i=0;i<13;i++){
+        const a=i*2.39996+.1,v=(u*.65+i*.13)%1,r=54+v*220;
+        const x=540+Math.cos(a)*r,y=540+Math.sin(a)*r;
+        g.fill(nib([[x,y],[x+Math.cos(a+.4)*12,y+Math.sin(a+.4)*12]],wTip(2*(1-v)+.5)));
+      }
+    });
+  }
+});
+
+function fernParts(){
+  const stem=[[144,1170],[321,860],[518,559],[724,261],[986,-97]];
+  const leaves=[];
+  for(let i=0;i<12;i++){
+    const v=i/11,x=lerp(230,883,v),y=lerp(1020,64,v),len=lerp(297,102,v);
+    leaves.push(petal(x,y,-2.85,len,lerp(58,21,v),-56,'fernL'+i));
+    leaves.push(petal(x+6,y-10,-.28,len*.84,lerp(57,19,v),-35,'fernR'+i));
+  }
+  return{stem:nib(stem,wTip(12)),leaves};
+}
+scene('canopy',{
+  inks:['blue','indigo','orange'],
+  plates(g,ink,rng,sr){
+    const {stem,leaves}=fernParts();
+    if(ink==='blue'){
+      shade(g,null,{x0:100,y0:50,x1:900,y1:1150,stops:[[0,.08],[.45,.16],[1,.6]]});
+      for(let i=0;i<3;i++){
+        const r=ridge(800+i*110,{rng:rngFor('canopy:hill'+i),amp:120,tilt:-.2});
+        plane(g,r,.18+i*.12);shade(g,r,{x0:0,y0:650+i*110,x1:0,y1:960+i*110,cut:true,stops:[[0,.6],[1,0]]});
+      }
+      for(const p of leaves){plane(g,p,.9);shade(g,p,{x0:200,y0:400,x1:900,y1:800,cut:true,stops:[[0,.08],[.45,.6],[1,.1]]});}
+      print(g,stem,1);
+    }
+    if(ink==='indigo'){
+      for(let i=0;i<leaves.length;i++){
+        if(i<8)print(g,leaves[i],.85-i*.06);
+        else {print(g,leaves[i],.3);shade(g,leaves[i],{x0:0,y0:0,x1:0,y1:800,cut:true,stops:[[0,1],[.5,.9],[1,0]]});}
+      }
+      print(g,stem,.9);
+    }
+    if(ink==='orange'){
+      for(let i=0;i<4;i++)print(g,leaves[i],.8-i*.17);
+      print(g,nib([[143,1170],[261,966],[337,839]],wTip(8)),.85);
+    }
+    const star=discPath(540,540,27);carve(g,star);
+  },
+  live(ctx,u){
+    inkPass(ctx,'blue',{alpha:.5},g=>{
+      for(let i=0;i<6;i++){
+        const v=(u*.23+i/6)%1,x=124+i*152+Math.sin(v*TAU+i)*31,y=970-v*840;
+        g.fill(nib([[x,y],[x+8,y-13]],wTip(1.8)));
+      }
+    });
+  }
+});
+
+function coronaPath(r,amp,key){
+  const pts=Array.from({length:96},(_,i)=>{const a=i*TAU/96;
+    const rr=r+amp*(.55*Math.sin(a*7)+.3*Math.sin(a*11+1)+.15*Math.cos(a*17));
+    return[540+Math.cos(a)*rr,540+Math.sin(a)*rr];});
+  return pathOf(pts,key,2);
+}
+scene('eclipse',{
+  inks:['blue','indigo','pink'],
+  plates(g,ink,rng,sr){
+    const outer=coronaPath(338,88,'ec:outer'),inner=coronaPath(214,26,'ec:inner');
+    if(ink==='blue'||ink==='indigo'){
+      tone(g,ink==='blue'?.74:.95);g.fillRect(0,0,W,W);
+      carve(g,outer);carve(g,inner);
+      g.save();g.globalCompositeOperation='destination-out';grainStars(g,rngFor('ec:stars'),240);g.restore();
+    }
+    if(ink==='pink'){
+      print(g,outer,1);shade(g,outer,{x:540,y:540,r:430,cut:true,stops:[[0,.98],[.45,.7],[.68,.18],[1,.62]]});
+      for(let i=0;i<36;i++){
+        const a=i*TAU/36;
+        const pts=arcPts(540,540,260+i%4*13,260+i%4*13,a,a+.2,12);
+        carve(g,nib(pts,wTip(2.7),{raw:true}));
+      }
+      carve(g,inner);
+    }
+  },
+  live(ctx,u){
+    inkPass(ctx,'pink',{alpha:.8},g=>{
+      for(let i=0;i<7;i++){
+        const a=i*TAU/7+u*.22,rr=233;
+        g.fill(nib(arcPts(540,540,rr,rr,a,a+.15,14),wSwell(2.3,.5,.5),{raw:true}));
+      }
+    });
+  }
+});
+
+function paintWorld(ctx,id,u=0,swap=null){
+  ctx.drawImage(paper,0,0);ctx.save();ctx.globalCompositeOperation='multiply';
+  ctx.drawImage(bakeScene(id,W,swap),0,0);ctx.restore();
+  if(SCENES[id].live)SCENES[id].live(ctx,u);
+}
+function bakeList(){
+  const list=WORLD_IDS.concat('night').map(id=>({id,size:W}));
+  for(const swap of ['swap1','swap2'])for(const id of ['eclipse','furnace','tide','canopy','husk'])list.push({id,size:W,swap});
+  return list;
+}
+
+/* Visual events also schedule the score. Openings overlap the outgoing cue. */
+const FLOW=[
+  {start:6,scene:'tide',open:.66,reveal:'iris',ink:'blue',note:74},
+  {start:7.25,scene:'sail',open:.72,reveal:'sweep',angle:-Math.PI/4,ink:'pink',note:78},
+  {start:8.5,scene:'garden',open:.62,reveal:'iris',ink:'pink',note:81},
+  {start:9.75,scene:'canopy',open:.65,reveal:'sweep',angle:-1.14,ink:'blue',note:76},
+  {start:10.75,scene:'furnace',open:.68,reveal:'iris',ink:'orange',note:78},
+  {start:12,scene:'husk',open:.65,reveal:'iris',ink:'orange',note:73},
+  {start:13,scene:'eclipse',open:.58,reveal:'iris',ink:'pink',note:81}
+];
+const ANSWER_PULSES=[
+  {s:.1,ink:'pink'},{s:.55,ink:'blue'},{s:1.1,ink:'pink'},
+  {s:1.65,ink:'blue'},{s:2.15,ink:'pink'},{s:2.65,ink:'blue'},{s:3.15,ink:'pink'}
+];
+const BLOOM={start:22,outerDuration:.85,outerStagger:.016,innerDelay:.19,
+  innerDuration:.74,innerStagger:.028,outerDamp:5.5,innerDamp:6};
+
+/* Windows reveal pinned artwork. No resampling of screened bitmaps occurs here. */
+function drawWindow(ctx,c,t){
+  const age=t-c.start;
+  let r=(c.radius||300)*easeInOutCubic(phase(age,0,c.open||.34));
+  if(c.dive!==undefined)r=lerp(r,CORNER+24,easeInOutCubic(phase(age,c.dive,.5)));
+  if(c.exit)r*=1-easeInOutCubic(phase(age,c.dur-.25,.25));
+  if(r<.1)return;
+  ctx.save();ctx.beginPath();ringAt(ctx,540,540,r,wobbler('window'+c.scene),.006);ctx.clip();
+  paintWorld(ctx,c.scene,.12+age*.23,c.swap);ctx.restore();
+  if(r<CORNER)inkPass(ctx,c.rim||'blue',{alpha:.7},g=>{
+    g.lineWidth=1.8;ringPath(g,540,540,r+5,wobbler('window'+c.scene),.006);g.stroke();
+  });
+}
+function drawWorld(ctx,c,t){
+  const opening=c.open||c.iris||0,u=opening?phase(t,c.start,opening):1;
+  if(u<=0)return;
+  const e=c.open?(1-Math.cos(Math.PI*u))*.5:easeInOutCubic(u);
+  let mask=null,edge=null;
+  if(u<1){
+    mask=new Path2D();
+    if(c.reveal==='sweep'){
+      const ca=Math.cos(c.angle),sa=Math.sin(c.angle),front=lerp(-990,990,e);
+      const point=(n,s)=>[540+n*ca-s*sa,540+n*sa+s*ca];
+      edge=Array.from({length:70},(_,i)=>{
+        const s=lerp(-1130,1130,i/69),bend=46*Math.sin(s/275+.55)*Math.sin(Math.PI*u);
+        return point(front+bend,s);
+      });
+      mask.moveTo(...point(-1300,-1130));edge.forEach(p=>mask.lineTo(...p));
+      mask.lineTo(...point(-1300,1130));mask.closePath();
+    }else ringAt(mask,540,540,Math.max(.01,(CORNER+72)*e),wobbler('flow:'+c.scene),.007);
+  }
+  ctx.save();if(mask)ctx.clip(mask);
+  paintWorld(ctx,c.scene,.15+(t-c.start)*.34,c.swap);ctx.restore();
+  if(mask&&c.ink){
+    const alpha=.55*Math.sin(Math.PI*u);
+    if(edge)directInk(ctx,c.ink,nib(edge,wSwell(1.5,.5,.9),{raw:true}),1,alpha);
+    else{
+      ctx.save();ctx.globalCompositeOperation='multiply';ctx.globalAlpha=alpha;
+      ctx.translate(...REG[c.ink]);ctx.strokeStyle=INK[c.ink];ctx.lineWidth=2;ctx.stroke(mask);ctx.restore();
+    }
+  }
+}
+const memoryRadius=t=>lerp(CORNER+72,146,easeOutQuad(phase(t,14,2)));
+function drawRecollection(ctx,c,t){
+  const r=memoryRadius(t),u=c.open?phase(t,c.start,c.open):1;
+  if(u<=0)return;
+  const reveal=r*(1-Math.cos(Math.PI*u))*.5;
+  ctx.save();ctx.beginPath();ctx.arc(540,540,Math.max(.01,reveal),0,TAU);ctx.clip();
+  paintWorld(ctx,c.scene,.15+(t-(c.motionStart??c.start))*.34,c.swap);ctx.restore();
+}
+function drawMemoryLens(ctx,c,t){
+  const r=memoryRadius(t);
+  inkPass(ctx,'blue',{alpha:.35},g=>{
+    g.lineWidth=1.8;for(const rr of [r+9,r+18]){ringPath(g,540,540,rr,wobbler('recall'),.004);g.stroke();}
+  });
+}
+
+const MEMORY=Array.from({length:36},(_,i)=>{
+  const r=rngFor('memory'+i);return{angle:i*2.399963,orbit:90+Math.sqrt(i/35)*325,
+    length:22+r()*22,width:6+r()*7,ink:['blue','pink','orange'][i%3],phase:r()*TAU};
+});
+function drawMemory(ctx,c,t){
+  const s=t-16,enter=easeOutQuad(phase(s,0,.65)),scatter=easeInQuad(phase(s,1.08,.62));
+  if(s<.28){
+    ctx.save();ctx.beginPath();ctx.arc(540,540,146*(1-easeInOutCubic(s/.28)),0,TAU);ctx.clip();
+    paintWorld(ctx,'eclipse',.4,'swap1');ctx.restore();
+  }
+  const drain=phase(s,.65,.4),groups={blue:[],pink:[],orange:[]},all=[];
+  MEMORY.forEach((m,i)=>{
+    const a=m.angle+s*(i%2?-.22:.22),r=m.orbit*enter+scatter*850;
+    const size=enter*(1-scatter);
+    if(size<.01)return;
+    const x=540+Math.cos(a)*r,y=540+Math.sin(a)*r;
+    const p=petal(x,y,a+Math.PI/2,m.length*size,m.width*size,9*size,'mem'+i);
+    groups[m.ink].push(p);all.push(p);
+  });
+  for(const ink of ['blue','pink','orange'])inkPass(ctx,ink,{coverage:.75,alpha:1-drain},g=>fillPaths(g,groups[ink]));
+  if(drain>0)inkPass(ctx,'blue',{coverage:.63,alpha:drain},g=>fillPaths(g,all));
+}
+
+function answerDots(t){
+  const move=easeInOutCubic(phase(t,18.1,2.1)),close=easeInOutCubic(phase(t,20.2,1.8));
+  const result=[[lerp(540,667,move)-close*79,lerp(540,403,move)+close*89],
+    [lerp(-110,343,move)+close*149,lerp(1120,767,move)-close*179]];
+  const gather=easeInQuad(phase(t,21.65,.35));
+  return result.map(([x,y])=>[lerp(x,540,gather),lerp(y,540,gather)]);
+}
+function drawAttraction(ctx,c,t){
+  const s=t-18,[[bx,by],[px,py]]=answerDots(t);
+  const bloom=phase(s,0,2.3),radius=(170+bloom*475)*(1-easeInOutCubic(phase(s,3.4,.6)));
+  bandPass(ctx,'pink',{},[.0625,.125,.1875].map((coverage,i)=>({coverage,path:discPath(-45,1120,radius-i*94)})));
+  const line=phase(s,1.75,1.1),tension=phase(s,3.1,.9);
+  if(line>0){
+    const dx=bx-px,dy=by-py;
+    for(const ink of ['blue','pink'])inkPass(ctx,ink,{alpha:line*.8},g=>{
+      const side=ink==='blue'?1:-1,bulge=(1-tension)*115*side;
+      const pts=[[px,py],[px+dx*.3+bulge,py+dy*.3+bulge*.72],
+        [px+dx*.68-bulge*.4,py+dy*.68-bulge*.25],[bx,by]];
+      g.fill(nib(pts,wSwell(1.6+tension,.5,.8)));
+    });
+  }
+  drawAnswerRipples(ctx,t);
+  if(tension>.2)inkPass(ctx,'orange',{},g=>{
+    const v=phase(tension,.2,.8);
+    for(let i=0;i<9;i++){
+      const a=i*TAU/9+v*.8,r=12+55*v;
+      g.fill(nib([[540+Math.cos(a)*r,540+Math.sin(a)*r],
+        [540+Math.cos(a)*(r+13*v),540+Math.sin(a)*(r+13*v)]],wTip(1.8)));
+    }
+  });
+  drawDotAt(ctx,bx,by,'indigo',DOT_R);
+  if(px>-30&&py<1110&&Math.hypot(px-bx,py-by)>3)drawDotAt(ctx,px,py,'pink',DOT_R+1,null,'orange');
+}
+
+function drawAnswerRipples(ctx,t){
+  const [[bx,by],[px,py]]=answerDots(Math.min(t,BLOOM.start));
+  for(const event of ANSWER_PULSES){
+    const u=phase(t,18+event.s,1.2);if(u<=0||u>=1)continue;
+    const [x,y]=event.ink==='pink'?[px,py]:[bx,by];
+    inkPass(ctx,event.ink,{alpha:(1-u)*.9},g=>{
+      g.lineWidth=3.5*(1-u)+.5;
+      ringPath(g,x,y,lerp(14,480,easeOutQuad(u)),wobbler('answer'+event.s),.01);g.stroke();
+    });
+  }
+}
+
+function flowerGeometry(age,scale=1,x=540,y=540){
+  const outer=[[],[],[]],inner=[[],[],[]],veins=[];
+  for(let i=0;i<13;i++){
+    const a=i*TAU/13-.16+age*.075;
+    const u=phase(age,BLOOM.outerStagger*(i%4),BLOOM.outerDuration),e=settle(u,{bounces:2,damp:BLOOM.outerDamp});
+    const len=(445+62*Math.sin(i*2.7))*e*scale;
+    const width=(58+18*Math.sin(i*1.7+1))*Math.pow(Math.max(e,0),.75)*scale;
+    const curl=(65+35*Math.sin(i*1.5+age*.8))*e*scale;
+    for(let b=0;b<3;b++)outer[b].push(petal(x,y,a,len*(1-b*.17),width*(1-b*.19),curl*(1-b*.22),'sun:outer'+i));
+    if(e>.3){
+      const ca=Math.cos(a),sa=Math.sin(a);
+      const coords=[[0,0],[len*.38,-width*.04],[len*.71,curl*.25],[len*.92,curl*.8]];
+      veins.push(nib(coords.map(([u,v])=>[x+u*ca-v*sa,y+u*sa+v*ca]),wTip(1.7*scale)));
+    }
+  }
+  for(let i=0;i<8;i++){
+    const a=i*TAU/8+.22-age*.11;
+    const u=phase(age,BLOOM.innerDelay+BLOOM.innerStagger*(i%3),BLOOM.innerDuration),e=settle(u,{bounces:2,damp:BLOOM.innerDamp});
+    for(let b=0;b<3;b++)inner[b].push(petal(x,y,a,(255+32*Math.cos(i*2))*e*scale*(1-b*.2),
+      (51+6*Math.sin(i))*e*scale*(1-b*.15),-67*e*scale*(1-b*.25),'sun:inner'+i));
+  }
+  return{outer,inner,veins};
+}
+function drawSun(ctx,age,scale=1,x=540,y=540){
+  const {outer,inner,veins}=flowerGeometry(age,scale,x,y),outerUnion=new Path2D(),innerUnion=new Path2D();
+  outer[0].forEach(p=>outerUnion.addPath(p));inner[0].forEach(p=>innerUnion.addPath(p));
+  paperShape(ctx,outerUnion);
+  bandPass(ctx,'pink',{},[.3,.58,.91].map((coverage,b)=>({coverage,path:unionPaths(outer[b])})).concat([
+    {coverage:0,path:unionPaths(veins),clipPath:outerUnion}
+  ]));
+  paperShape(ctx,innerUnion);
+  bandPass(ctx,'orange',{},[.3,.63,.96].map((coverage,b)=>({coverage,path:unionPaths(inner[b])})));
+  const heart=48*scale*easeOutCubic(phase(age,.1,.55));
+  paperShape(ctx,discPath(x,y,heart));
+  directInk(ctx,'yellow',discPath(x,y,heart));
+  const seeds=new Path2D();
+  for(let i=0;i<55;i++){
+      const r=Math.sqrt(i/55)*heart*.67,a=i*2.399963+age*.09;
+      seeds.addPath(discPath(x+Math.cos(a)*r,y+Math.sin(a)*r,Math.max(.3,2.1*scale)));
+  }
+  directInk(ctx,'indigo',seeds);
+}
+const POLLEN=Array.from({length:88},(_,i)=>{
+  const r=rngFor('pollen'+i);return{angle:r()*TAU,speed:550+r()*780,delay:r()*.23,size:1.5+r()*2.8,curve:r()*.8-.4};
+});
+function drawRelease(ctx,c,t){
+  const age=t-BLOOM.start;
+  if(age<.35)drawAnswerRipples(ctx,t);
+  drawSun(ctx,age,1+Math.max(0,age-1)*.15);
+  if(age<.28)drawDotAt(ctx,540,540,'indigo',DOT_R*(1-phase(age,.06,.22)));
+  for(const ink of ['pink','orange'])inkPass(ctx,ink,{alpha:1-phase(age,1.2,.8)},g=>{
+    POLLEN.forEach((p,i)=>{
+      if((i%2===0)!==(ink==='pink'))return;
+      const v=Math.max(0,age-p.delay);if(v<=0)return;
+      const radius=p.speed*(1-Math.exp(-v*2.1)),a=p.angle+p.curve*v;
+      const x=540+Math.cos(a)*radius,y=540+Math.sin(a)*radius+v*v*40;
+      const tail=Math.min(33,70*v)*Math.exp(-v*.9);
+      g.fill(nib([[x-Math.cos(a)*tail,y-Math.sin(a)*tail],[x,y]],wTip(p.size*Math.max(.1,1-v*.3))));
+    });
+  });
+}
+
+scene('night',{
+  inks:['blue','indigo'],
+  plates(g,ink,rng){
+    tone(g,ink==='indigo'?.95:.72);g.fillRect(0,0,W,W);
+    if(ink==='blue')shade(g,null,{x:570,y:430,r:580,cut:true,stops:[[0,.7],[.45,.26],[1,0]]});
+    g.save();g.globalCompositeOperation='destination-out';grainStars(g,rngFor('night:stars'),560);g.restore();
+  }
+});
+const SKYSEEDS=Array.from({length:105},(_,i)=>{
+  const r=rngFor('skyseed'+i);return{a:i*2.399963,r:90+Math.sqrt(i/105)*940,size:4+r()*6,
+    pink:i%3!==0,phase:r()*TAU};
+});
+function drawNightGarden(ctx,c,t){
+  const age=t-24,entry=easeInOutCubic(phase(age,0,.44)),exit=1-easeInOutCubic(phase(age,1.65,.35));
+  const radius=(CORNER+20)*entry*exit;
+  ctx.save();ctx.beginPath();ctx.arc(540,540,Math.max(.001,radius),0,TAU);ctx.clip();paintWorld(ctx,'night',0);
+  const camera=lerp(2.4,.82,easeInOutCubic(phase(age,.05,1.2))),groups={pink:[],orange:[]},centres=[];
+  SKYSEEDS.forEach((s,i)=>{
+    const a=s.a+age*(i%2?.016:-.016),x=540+Math.cos(a)*s.r*camera,y=540+Math.sin(a)*s.r*camera;
+    if(x<-35||x>1115||y<-35||y>1115)return;
+    const size=s.size*(.85+.15*Math.sin(age*2+s.phase));
+    const p=new Path2D();
+    if(i%7===0){for(let j=0;j<5;j++)p.addPath(petal(x,y,j*TAU/5+a,size*2.2,size*.64,3,'sky'+i+j));}
+    else p.addPath(petal(x,y,a,size*2.1,size*.62,3,'sky'+i));
+    groups[s.pink?'pink':'orange'].push(p);centres.push(discPath(x,y,size*.16));
+  });
+  const lights=new Path2D();[...groups.pink,...groups.orange].forEach(p=>lights.addPath(p));paperShape(ctx,lights);
+  for(const ink of ['pink','orange'])directInk(ctx,ink,unionPaths(groups[ink]),.8);
+  directInk(ctx,'yellow',unionPaths(centres));
+  ctx.restore();
+  const size=lerp(1.15,.12,easeInOutCubic(phase(age,0,1.15)))*exit;
+  if(size>.001)drawSun(ctx,2+age,size);
+}
+
+/* A reusable single-line alphabet; curves are points, never browser fonts. */
+const glyphArc=(x,y,r,a,b,n=25)=>arcPts(x,y,r,r,a,b,n);
+const GLYPHS={
+  a:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.4],[.63,1]]]},
+  b:{w:.72,s:[[[.1,.05],[.1,1]],glyphArc(.35,.71,.28,-Math.PI*.5,Math.PI*1.5)]},
+  c:{w:.65,s:[glyphArc(.35,.7,.29,1.05,TAU-1.05)]},
+  d:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.04],[.63,1]]]},
+  e:{w:.65,s:[[[.08,.68],[.62,.68]],glyphArc(.35,.69,.28,-.1,-5.2)]},
+  f:{w:.46,s:[[[.16,1],[.16,.25],[.2,.08],[.43,.08]],[[.02,.4],[.43,.4]]]},
+  g:{w:.72,s:[glyphArc(.34,.69,.29,-.2,-.2-TAU),[[.63,.4],[.63,1.16],[.51,1.32],[.2,1.3]]]},
+  h:{w:.72,s:[[[.1,.05],[.1,1]],[[.1,.65],[.22,.42],[.46,.42],[.61,.57],[.61,1]]]},
+  i:{w:.3,s:[[[.15,.4],[.15,1]],[[.15,.17],[.15,.2]]]},
+  j:{w:.35,s:[[[.24,.4],[.24,1.2],[.12,1.3],[-.03,1.28]],[[.24,.17],[.24,.2]]]},
+  k:{w:.63,s:[[[.1,.04],[.1,1]],[[.59,.4],[.12,.72],[.61,1]]]},
+  l:{w:.3,s:[[[.15,.04],[.15,1]]]},
+  m:{w:1.01,s:[[[.08,1],[.08,.4],[.08,.65],[.22,.42],[.41,.43],[.49,.6],[.49,1]],[[.49,.65],[.64,.42],[.84,.43],[.93,.6],[.93,1]]]},
+  n:{w:.72,s:[[[.09,.4],[.09,1]],glyphArc(.35,.66,.26,Math.PI,TAU).concat([[.61,1]])]},
+  o:{w:.72,s:[glyphArc(.35,.7,.29,0,TAU)]},
+  p:{w:.72,s:[[[.1,1.3],[.1,.4]],glyphArc(.35,.68,.27,-Math.PI*.5,Math.PI*1.5)]},
+  q:{w:.72,s:[glyphArc(.35,.68,.27,0,TAU),[[.62,.4],[.62,1.3],[.78,1.15]]]},
+  r:{w:.5,s:[[[.1,1],[.1,.4],[.1,.68],[.25,.43],[.45,.44]]]},
+  s:{w:.62,s:[[[.56,.47],[.4,.4],[.22,.43],[.16,.55],[.3,.66],[.48,.75],[.54,.88],[.4,.98],[.2,.95],[.1,.9]]]},
+  t:{w:.47,s:[[[.19,.16],[.19,.84],[.25,.98],[.43,.93]],[[.03,.4],[.44,.4]]]},
+  u:{w:.72,s:[[[.09,.4],[.09,.72]].concat(glyphArc(.35,.72,.26,Math.PI,0)).concat([[.61,.4]]),[[.61,.62],[.61,1]]]},
+  v:{w:.68,s:[[[.05,.4],[.34,1],[.63,.4]]]},
+  w:{w:.99,s:[[[.05,.4],[.25,1],[.49,.55],[.74,1],[.94,.4]]]},
+  x:{w:.66,s:[[[.06,.4],[.6,1]],[[.6,.4],[.06,1]]]},
+  y:{w:.68,s:[[[.05,.4],[.34,1]],[[.63,.4],[.19,1.32],[.03,1.3]]]},
+  z:{w:.66,s:[[[.06,.4],[.6,.4],[.06,1],[.6,1]]]},
+  '0':{w:.73,s:[glyphArc(.36,.55,.36,0,TAU).map(([x,y])=>[x,(y-.55)*1.28+.55])]},
+  '1':{w:.5,s:[[[.05,.24],[.28,.06],[.28,1]],[[.07,1],[.47,1]]]},
+  '2':{w:.7,s:[[[.05,.24],[.2,.08],[.48,.09],[.62,.29],[.51,.48],[.05,1],[.65,1]]]},
+  '3':{w:.7,s:[[[.07,.09],[.62,.09],[.32,.49],[.55,.59],[.63,.81],[.43,1],[.12,.94]]]},
+  '4':{w:.7,s:[[[.5,.05],[.05,.72],[.67,.72]],[[.52,.05],[.52,1]]]},
+  '5':{w:.7,s:[[[.62,.09],[.12,.09],[.09,.51],[.43,.47],[.61,.61],[.6,.84],[.4,1],[.1,.92]]]},
+  '6':{w:.7,s:[[[.58,.09],[.3,.13],[.1,.5],[.1,.83],[.28,1],[.51,.94],[.63,.7],[.48,.51],[.12,.56]]]},
+  '7':{w:.7,s:[[[.05,.09],[.65,.09],[.25,1]]]},
+  '8':{w:.7,s:[glyphArc(.35,.28,.22,0,TAU),glyphArc(.35,.75,.26,0,TAU)]},
+  '9':{w:.7,s:[glyphArc(.35,.32,.26,0,TAU),[[.6,.32],[.55,.78],[.32,1],[.14,.94]]]},
+  ' ':{w:.38,s:[]},'.':{w:.3,s:[[[.15,.96],[.15,1]]]},'-':{w:.55,s:[[[.07,.7],[.48,.7]]]}
+};
+const SCRIPT={
+  l:{w:.42,s:[[[.01,.92],[.24,.5],[.42,.13],[.32,.01],[.12,.27],[.04,.73],[.16,.96],[.43,.84]]]},
+  u:{w:.63,s:[[[0,.48],[.03,.83],[.16,.97],[.35,.81],[.46,.42],[.38,.84],[.47,.98],[.64,.84]]]},
+  m:{w:.98,s:[[[0,.86],[.17,.45],[.14,.84],[.12,.95],[.35,.48],[.49,.5],[.48,.87],[.46,.95],[.68,.48],[.83,.51],[.81,.85],[.94,.95],[1.05,.83]]]},
+  e:{w:.59,s:[[[0,.84],[.36,.69],[.46,.49],[.34,.4],[.12,.6],[.1,.85],[.29,.98],[.55,.84]]]},
+  n:{w:.69,s:[[[0,.86],[.14,.44],[.12,.87],[.1,.97],[.36,.47],[.5,.49],[.51,.84],[.63,.98],[.83,.89]]]},
+};
+function letterStrokes(word,size,y,tracking=2,script=false){
+  const glyphs=script?SCRIPT:GLYPHS;
+  const width=[...word].reduce((w,ch)=>w+(glyphs[ch]?.w||.5)*size+tracking,0)-tracking;
+  let pen=540-width/2;const out=[];
+  for(const ch of word){const gl=glyphs[ch];if(!gl)continue;
+    for(const st of gl.s){const pts=st.map(([x,v])=>[pen+(x+(script?.1*(1-v):0))*size,y+v*size]);
+      out.push(script?curve(pts,false,9):pts);}
+    pen+=gl.w*size+tracking;
+  }return out;
+}
+const TITLE=letterStrokes('lumen',186,381,5,true),BYLINE=letterStrokes('a small impossibility',25,694,3);
+function partialStrokes(strokes,progress){
+  const lengths=strokes.map(st=>st.slice(1).reduce((sum,p,i)=>sum+Math.hypot(p[0]-st[i][0],p[1]-st[i][1]),0));
+  let remaining=lengths.reduce((a,b)=>a+b,0)*clamp(progress,0,1);const result=[];
+  for(let j=0;j<strokes.length&&remaining>0;j++){
+    const st=strokes[j],pts=[st[0]];
+    for(let i=1;i<st.length&&remaining>0;i++){
+      const a=st[i-1],b=st[i],len=Math.hypot(b[0]-a[0],b[1]-a[1]);
+      const v=Math.min(1,remaining/(len||1));pts.push([lerp(a[0],b[0],v),lerp(a[1],b[1],v)]);remaining-=len;
+    }
+    if(pts.length>1)result.push(pts);
+  }return result;
+}
+function writeLetters(g,strokes,progress,width){
+  for(const pts of partialStrokes(strokes,progress))g.fill(nib(pts,wNib(pts,width,-.7,.26),{raw:true}));
+}
+let signatureCells=null;
+function bakeSignature(){
+  const c=cv(W,W),g=c.getContext('2d');g.fillStyle='#000';writeLetters(g,TITLE,1,6.5);writeLetters(g,BYLINE,1,1.5);
+  const pixels=g.getImageData(0,0,W,W).data,r=rngFor('signature:dissolve');signatureCells=[];
+  for(let y=370;y<740;y+=4)for(let x=150;x<950;x+=4)if(pixels[(y*W+x)*4+3]>25)signatureCells.push([x,y,r()]);
+}
+function drawSignature(ctx,c,t){
+  const age=t-26,fade=phase(age,1.68,.3);
+  if(fade>0){
+    if(!signatureCells)bakeSignature();
+    for(const ink of ['pink','indigo'])inkPass(ctx,ink,{},g=>{
+      for(const [x,y,delay] of signatureCells){const v=1-phase(fade,delay*.34,.66);if(v<.01)continue;
+        g.beginPath();g.arc(x,y,2.55*v,0,TAU);g.fill();}
+    });
+  }else{
+    for(const ink of ['pink','indigo'])inkPass(ctx,ink,{alpha:ink==='pink'?.72:1},g=>{
+      writeLetters(g,TITLE,phase(age,.02,.85),6.5);writeLetters(g,BYLINE,phase(age,.75,.5),1.5);
+    });
+  }
+  const r=DOT_R*(1-.75*phase(age,1.7,.3));
+  if(age>.2){drawDotAt(ctx,516,641,'indigo',r);drawDotAt(ctx,564,641,'pink',r,null,'orange');}
+  const q=phase(age,.9,.65);
+  if(q>0&&q<1)inkPass(ctx,'pink',{alpha:(1-q)*.6},g=>{
+    g.lineWidth=1.2;ringPath(g,564,641,12+q*58,wobbler('sign:ring'),.01);g.stroke();
+  });
+}
+
+/* Offline score: continuous reeds and air; foreground sound follows visual events. */
+let scorePromise=null;
+function buildScore(){
+  if(scorePromise)return scorePromise;
+  scorePromise=(async()=>{
+    const rate=48000,ac=new OfflineAudioContext(2,rate*DUR,rate);
+    const master=ac.createGain(),compressor=ac.createDynamicsCompressor(),shelf=ac.createBiquadFilter(),top=ac.createBiquadFilter();
+    compressor.threshold.value=-19;compressor.knee.value=18;compressor.ratio.value=2;
+    compressor.attack.value=.035;compressor.release.value=.32;
+    shelf.type='highshelf';shelf.frequency.value=2600;shelf.gain.value=-4.5;
+    top.type='lowpass';top.frequency.value=5800;top.Q.value=.45;
+    master.gain.setValueAtTime(.75,0);master.gain.setValueAtTime(.75,27.1);
+    master.gain.exponentialRampToValueAtTime(.0001,27.98);
+    master.connect(shelf);shelf.connect(top);top.connect(compressor);compressor.connect(ac.destination);
+    const verb=ac.createConvolver(),wet=ac.createGain();wet.gain.value=.3;
+    const impulse=ac.createBuffer(2,rate*2.7,rate);
+    for(let ch=0;ch<2;ch++){
+      const data=impulse.getChannelData(ch),r=rngFor('lumen:reverb'+ch);let lp=0;
+      for(let i=0;i<data.length;i++){lp=lp*.63+(r()*2-1)*.37;
+        data[i]=lp*Math.exp(-i/(rate*.54))*(1-Math.exp(-i/(rate*.011)));}
+    }
+    verb.buffer=impulse;verb.connect(wet);wet.connect(master);
+    function route(node,pan=0,send=.35){
+      const p=ac.createStereoPanner();p.pan.value=pan;node.connect(p);p.connect(master);
+      const s=ac.createGain();s.gain.value=send;p.connect(s);s.connect(verb);
+    }
+    const hz=m=>440*Math.pow(2,(m-69)/12);
+    function glass(at,midi,vel=.1,pan=0,dur=1.7,attack=.026){
+      if(at>=27.8)return;
+      const envelope=ac.createGain();envelope.gain.setValueAtTime(.0001,at);
+      envelope.gain.linearRampToValueAtTime(vel,at+attack);
+      envelope.gain.exponentialRampToValueAtTime(.0001,Math.min(28,at+dur));route(envelope,pan,.6);
+      [[1,1],[2.001,.11],[3.98,.022]].forEach(([ratio,amp])=>{
+        const osc=ac.createOscillator(),g=ac.createGain();osc.type='sine';osc.frequency.value=hz(midi)*ratio;
+        g.gain.value=amp;osc.connect(g);g.connect(envelope);osc.start(at);osc.stop(Math.min(28,at+dur));
+      });
+    }
+    function pad(at,end,notes,level=.026,attack=1.1,release=1.35){
+      const env=ac.createGain(),filter=ac.createBiquadFilter();filter.type='lowpass';filter.frequency.value=1250;filter.Q.value=.3;
+      env.gain.setValueAtTime(.0001,at);env.gain.linearRampToValueAtTime(level,at+attack);
+      env.gain.setValueAtTime(level,Math.max(at+attack+.01,end-release));env.gain.linearRampToValueAtTime(.0001,Math.min(end,27.98));
+      filter.connect(env);route(env,0,.7);
+      notes.forEach((note,i)=>[-4,4].forEach((detune,j)=>{
+        const osc=ac.createOscillator(),g=ac.createGain(),p=ac.createStereoPanner();osc.type=j?'sine':'triangle';
+        osc.frequency.value=hz(note);osc.detune.value=detune;g.gain.value=j?.7:.4;p.pan.value=(i/(notes.length-1)-.5)*1.05;
+        osc.connect(g);g.connect(p);p.connect(filter);osc.start(at);osc.stop(Math.min(end,28));
+      }));
+    }
+    function bass(at,midi,vel=.065,dur=1.1,attack=.085){
+      const o=ac.createOscillator(),e=ac.createGain();o.type='sine';o.frequency.value=hz(midi);
+      e.gain.setValueAtTime(.0001,at);e.gain.linearRampToValueAtTime(vel,at+attack);
+      e.gain.exponentialRampToValueAtTime(.0001,Math.min(28,at+dur));o.connect(e);route(e,0,.16);o.start(at);o.stop(Math.min(28,at+dur+.04));
+    }
+    function breath(at,dur,vol,key,pan=0,peak=.42){
+      const n=Math.ceil(rate*dur),b=ac.createBuffer(1,n,rate),d=b.getChannelData(0),r=rngFor(key);let low=0;
+      for(let i=0;i<n;i++){low=low*.8+(r()*2-1)*.2;d[i]=low;}
+      const src=ac.createBufferSource(),f=ac.createBiquadFilter(),soft=ac.createBiquadFilter(),e=ac.createGain();src.buffer=b;
+      f.type='bandpass';f.frequency.setValueAtTime(420,at);
+      f.frequency.exponentialRampToValueAtTime(1000,at+dur*peak);
+      f.frequency.exponentialRampToValueAtTime(480,Math.min(28,at+dur));f.Q.value=.45;
+      soft.type='lowpass';soft.frequency.value=2000;soft.Q.value=.4;
+      e.gain.setValueAtTime(.0001,at);
+      const envelope=Float32Array.from({length:192},(_,i)=>{
+        const u=i/191,v=u<peak?u/peak:(1-u)/(1-peak);return .0001+vol*Math.pow(Math.sin(v*Math.PI/2),2);
+      });
+      e.gain.setValueCurveAtTime(envelope,at,dur);src.connect(f);f.connect(soft);soft.connect(e);route(e,pan,.7);
+      src.start(at);src.stop(Math.min(28,at+dur));
+    }
+    function continuousAir(){
+      const b=ac.createBuffer(2,rate*DUR,rate);
+      for(let ch=0;ch<2;ch++){
+        const d=b.getChannelData(ch),r=rngFor('lumen:room'+ch);let low=0;
+        for(let i=0;i<d.length;i++){
+          low=low*.982+(r()*2-1)*.018;
+          d[i]=low*(.9+.1*Math.sin(i/rate*.39+ch));
+        }
+      }
+      const s=ac.createBufferSource(),g=ac.createGain(),f=ac.createBiquadFilter();s.buffer=b;
+      f.type='highpass';f.frequency.value=115;f.Q.value=.5;
+      g.gain.setValueAtTime(.001,0);g.gain.linearRampToValueAtTime(.2,.8);
+      g.gain.setValueAtTime(.2,26.5);g.gain.linearRampToValueAtTime(.0001,27.98);
+      s.connect(f);f.connect(g);route(g,0,.5);s.start(0);
+    }
+    continuousAir();
+    pad(0,27.98,[50,57,64],.013,.75,1.6);
+    pad(0,7.3,[50,57,61,64,69],.022,.9,1.6);
+    pad(5.8,11.6,[47,54,57,61,66],.025,1.25,1.7);
+    pad(10.0,15.8,[43,50,54,57,64],.024,1.3,1.7);
+    pad(14.2,19.4,[45,52,57,59,64],.023,1.3,1.5);
+    pad(17.9,23.1,[47,54,57,61,66],.024,1.35,1.55);
+    pad(21.65,26.8,[50,57,61,64,66,73],.028,1.0,1.6);
+    pad(25.3,27.98,[50,57,61,66],.02,.85,1.1);
+
+    const introNotes=[74,81,78,85,81];
+    CUES.filter(c=>c.kind==='ripple').forEach((c,i)=>glass(c.start,introNotes[i%5],.102,i%2?.3:-.3,1.9));
+    glass(CUES.find(c=>c.kind==='world').start,85,.077,.22,1.65);
+    FLOW.forEach((event,i)=>{
+      const pan=event.ink==='blue'?-.24:.24;
+      // A sweep first travels in from outside the frame; its audible accent
+      // follows the first visible ink instead of the off-screen start.
+      const accent=event.start+event.open*(event.reveal==='sweep'?.28:.09);
+      glass(accent,event.note,.086,pan,1.55);
+      breath(event.start,event.open+.3,.065,'flow:'+event.scene,pan,event.open*.5/(event.open+.3));
+      if(i%2===0)bass(event.start+.08,[38,35,31,33][Math.floor(i/2)],.055);
+    });
+    CUES.filter(c=>c.kind==='recall').forEach((c,i)=>{
+      glass(c.start+.015,[81,78,76,74,73,69,66,62][i],.045,Math.sin(i)*.42,1.05);
+    });
+    glass(16.12,78,.052,-.3,1.8);glass(16.56,74,.04,.3,1.65);
+    breath(17.08,.85,.05,'memory:scatter',0,.45);
+    ANSWER_PULSES.forEach(event=>{
+      const at=18+event.s,index=event.ink==='pink'?1:0,x=answerDots(at)[index][0];
+      glass(at,event.ink==='pink'?81:78,.077,clamp((x-540)/540,-.7,.7),1.6);
+    });
+
+    // Expansion energy (d/dt of projected petal area) places the two accents.
+    function expansionPeak(inner){
+      const count=inner?8:13,duration=inner?BLOOM.innerDuration:BLOOM.outerDuration;
+      const delay=inner?BLOOM.innerDelay:0,step=inner?BLOOM.innerStagger:BLOOM.outerStagger;
+      const damp=inner?BLOOM.innerDamp:BLOOM.outerDamp,mod=inner?3:4;
+      let previous=0,maxRate=0,best=0;
+      for(let j=0;j<1500;j++){
+        const t=j*.001;let area=0;
+        for(let i=0;i<count;i++)area+=settle(phase(t,delay+step*(i%mod),duration),{bounces:2,damp})**2/count;
+        const speed=area-previous;if(speed>maxRate){maxRate=speed;best=t;}previous=area;
+      }return best;
+    }
+    const outer=BLOOM.start+expansionPeak(false),inner=BLOOM.start+expansionPeak(true);
+    breath(BLOOM.start-.7,2.3,.19,'bloom:unfurl',0,(outer-(BLOOM.start-.7))/2.3);
+    glass(outer-.06,62,.09,-.2,2.4,.06);
+    glass(outer+.025,69,.059,.28,2.1,.075);
+    glass(inner-.055,74,.079,.18,2.3,.055);
+    glass(inner+.08,78,.053,-.32,1.9,.08);
+    glass(inner+.27,81,.03,.35,1.9,.09);
+    bass(BLOOM.start,38,.069,2.2,.19);
+    [0,.24,.55,.92].forEach((d,i)=>glass(inner+.34+d,[81,85,81,78][i],.027-i*.003,Math.sin(i+.5)*.48,1.7,.06));
+    for(let i=0;i<8;i++)glass(24.1+i*.27,[81,78,76,74,73,69,66,62][i],.057-i*.003,Math.sin(i)*.45,1.6,.04);
+    glass(26.35,74,.078,-.25,1.6);glass(26.9,78,.068,.25,1.08);glass(27.2,81,.038,0,.75);
+    const buffer=await ac.startRendering();
+    let peak=0;for(let ch=0;ch<2;ch++)for(const s of buffer.getChannelData(ch))peak=Math.max(peak,Math.abs(s));
+    const gain=.79/Math.max(.001,peak);
+    for(let ch=0;ch<2;ch++){const data=buffer.getChannelData(ch);for(let i=0;i<data.length;i++)data[i]*=gain;}
+    return buffer;
+  })();return scorePromise;
+}
+async function renderAudio(){
+  const b=await buildScore(),n=b.length,bytes=new ArrayBuffer(44+n*4),v=new DataView(bytes);
+  const str=(at,s)=>{for(let i=0;i<s.length;i++)v.setUint8(at+i,s.charCodeAt(i));};
+  str(0,'RIFF');v.setUint32(4,36+n*4,true);str(8,'WAVE');str(12,'fmt ');v.setUint32(16,16,true);
+  v.setUint16(20,1,true);v.setUint16(22,2,true);v.setUint32(24,b.sampleRate,true);v.setUint32(28,b.sampleRate*4,true);
+  v.setUint16(32,4,true);v.setUint16(34,16,true);str(36,'data');v.setUint32(40,n*4,true);
+  for(let i=0;i<n;i++)for(let ch=0;ch<2;ch++)v.setInt16(44+i*4+ch*2,Math.round(clamp(b.getChannelData(ch)[i],-1,1)*32767),true);
+  const data=new Uint8Array(bytes);let s='';for(let i=0;i<data.length;i+=16384)s+=String.fromCharCode(...data.subarray(i,i+16384));
+  return btoa(s);
+}
+
+/* The cue array owns time; all render functions are pure in their local time. */
+const ACTS=[{t:0,name:'I · seed'},{t:6,name:'II · worlds'},{t:16,name:'III · hush'},
+  {t:18,name:'IV · attraction'},{t:22,name:'V · light'},{t:26,name:'VI · lumen'}];
+Object.assign(SWAPS.swap1,{blue:'pink',pink:'blue',orange:'pink',yellow:'yellow',indigo:'indigo'});
+Object.assign(SWAPS.swap2,{blue:'blue',pink:'orange',orange:'blue',yellow:'pink',indigo:'indigo'});
+const CUES=[
+  {start:1.5,dur:1.2,kind:'window',scene:'husk',radius:340,exit:true,rim:'orange'},
+  {start:2.75,dur:1.1,kind:'window',scene:'canopy',radius:305,exit:true},
+  {start:3.85,dur:1.85,kind:'window',scene:'eclipse',radius:310,dive:.55,rim:'pink'},
+  {start:5.15,dur:FLOW[0].start+FLOW[0].open-5.15,kind:'world',scene:'moth',iris:.42},
+];
+FLOW.forEach((shot,i)=>{
+  const next=FLOW[i+1],end=next?next.start+next.open:14;
+  CUES.push({...shot,dur:end-shot.start,kind:'world'});
+});
+const RECALL=['eclipse','furnace','tide','eclipse'];
+RECALL.forEach((id,i)=>CUES.push({start:14+i*.5,dur:i===3?.5:.85,kind:'recall',scene:id,
+  open:i?.35:0,motionStart:i?14+i*.5:13,swap:i?(i%2?'swap1':'swap2'):null}));
+CUES.push({start:14,dur:2,kind:'memoryLens'});
+CUES.push({start:16,dur:2,kind:'memory'},{start:18,dur:4,kind:'attraction'},
+  {start:22,dur:2,kind:'release'},{start:24,dur:2,kind:'night'},
+  {start:26,dur:2.001,kind:'signature'});
+for(const start of [.1,.85,1.5,2.7,3.7])CUES.push({start,dur:.95,
+  kind:'ripple',ink:'blue',seed:'lumen'+start});
+const DRAW={ripple:drawRipple,window:drawWindow,world:drawWorld,recall:drawRecollection,
+  memoryLens:drawMemoryLens,memory:drawMemory,attraction:drawAttraction,release:drawRelease,night:drawNightGarden,signature:drawSignature};
+function dotPos(t,which){return answerDots(t)[which==='pink'?1:0];}
+const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
+canvas.width=canvas.height=W;
+const DEBUG=new URLSearchParams(location.search).get('debug');
+function render(t){
+  t=clamp(t,0,DUR);ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=1;
+  ctx.globalCompositeOperation='source-over';ctx.drawImage(paper,0,0);
+  const selected=new URLSearchParams(location.search).get('scene');
+  if(selected&&SCENES[selected]){paintWorld(ctx,selected,t%1);drawDot(ctx,t);return;}
+  for(const cue of CUES) if(t>=cue.start&&t<cue.start+cue.dur) DRAW[cue.kind]?.(ctx,cue,t);
+  if(t<18)drawDot(ctx,t);
+}
+let playing=false,playT=0,lastWall=0,rafId=0,audioEnabled=false,liveCtx=null,liveSrc=null,scoreBuffer=null;
+const elHead=document.getElementById('play-head'),elScrub=document.getElementById('scrub'),
+  elT=document.getElementById('t'),elPlay=document.getElementById('btn-play');
+function stopSound(){if(liveSrc){liveSrc.onended=null;liveSrc.stop();liveSrc=null;}}
+function startSound(){
+  stopSound();if(!audioEnabled||!scoreBuffer||!playing||playT>=DUR)return;
+  liveCtx=liveCtx||new AudioContext();liveCtx.resume();
+  liveSrc=liveCtx.createBufferSource();liveSrc.buffer=scoreBuffer;liveSrc.connect(liveCtx.destination);
+  liveSrc.start(0,playT);liveSrc.onended=()=>{liveSrc=null;};
+}
+function show(t){playT=clamp(t,0,DUR);render(playT);elHead.style.left=playT/DUR*100+'%';
+  elT.textContent=playT.toFixed(2)+' / 28.00';elScrub.setAttribute('aria-valuenow',playT.toFixed(2));}
+function tick(now){if(!playing)return;const next=playT+(now-lastWall)/1000;lastWall=now;show(next);
+  if(next>=DUR)setPlaying(false);else rafId=requestAnimationFrame(tick);}
+function setPlaying(v){cancelAnimationFrame(rafId);playing=v;elPlay.textContent=v?'pause':'play';
+  if(v){if(playT>=DUR)show(0);lastWall=performance.now();startSound();rafId=requestAnimationFrame(tick);}else stopSound();}
+elPlay.onclick=()=>setPlaying(!playing);
+document.getElementById('btn-replay').onclick=()=>{setPlaying(false);show(0);setPlaying(true);};
+elScrub.onclick=e=>{const r=elScrub.getBoundingClientRect();setPlaying(false);show((e.clientX-r.left)/r.width*DUR);};
+addEventListener('keydown',e=>{if(e.code==='Space'&&e.target.tagName!=='BUTTON'){e.preventDefault();setPlaying(!playing);}
+  if(e.code==='ArrowRight'||e.code==='ArrowLeft'){e.preventDefault();setPlaying(false);show(playT+(e.code==='ArrowRight'?1:-1)/30);}});
+for(const a of ACTS){const d=document.createElement('div');d.className='act';d.style.left=a.t/DUR*100+'%';d.textContent=a.name;d.dataset.short=a.name.split(' · ')[0];elScrub.appendChild(d);}
+document.getElementById('btn-audio').onclick=async function(){
+  if(typeof buildScore!=='function')return;
+  audioEnabled=!audioEnabled;if(!audioEnabled){stopSound();this.textContent='sound: off';return;}
+  this.textContent='mixing…';liveCtx=liveCtx||new AudioContext();await liveCtx.resume();
+  scoreBuffer=scoreBuffer||await buildScore();this.textContent='sound: on';startSound();
+};
+document.getElementById('btn-rec').onclick=function(){
+  if(typeof MediaRecorder==='undefined'){this.textContent='unavailable';return;}
+  const mime=['video/mp4;codecs=avc1','video/webm;codecs=vp9','video/webm;codecs=vp8'].find(m=>MediaRecorder.isTypeSupported(m));
+  if(!mime){this.textContent='no codec';return;}
+  const stream=canvas.captureStream(30),rec=new MediaRecorder(stream,{mimeType:mime,videoBitsPerSecond:12e6}),chunks=[];
+  rec.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
+  rec.onstop=()=>{const a=document.createElement('a'),url=URL.createObjectURL(new Blob(chunks,{type:mime}));a.href=url;
+    a.download='lumen'+(mime.startsWith('video/mp4')?'.mp4':'.webm');a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+    stream.getTracks().forEach(track=>track.stop());this.textContent='record';this.disabled=false;};
+  this.textContent='recording…';this.disabled=true;setPlaying(false);show(0);rec.start();setPlaying(true);
+  setTimeout(()=>{rec.stop();setPlaying(false);},DUR*1000+100);
+};
+paper=bakePaper();for(const name of Object.keys(INK))screenOf(name);
+window.__riso={duration:DUR,ready:false,seek(t){setPlaying(false);show(t);}};
+if(typeof renderAudio==='function')window.__riso.renderAudio=renderAudio;
+(async function boot(){
+  const jobs=typeof bakeList==='function'?bakeList():[],el=document.getElementById('load');
+  for(let i=0;i<jobs.length;i++){el.textContent='printing light · '+(i+1)+' / '+jobs.length;
+    await new Promise(r=>setTimeout(r,0));const j=jobs[i];bakeScene(j.id,j.size||W,j.swap);}
+  el.remove();show(Number(new URLSearchParams(location.search).get('t'))||0);window.__riso.ready=true;
+})();
+</script>
+</html>

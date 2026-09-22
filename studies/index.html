@@ -1,0 +1,1971 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>riso drawing studies</title>
+<style>
+  /* The harness screenshots the whole 720-square viewport, so the canvas sits at
+     the origin with nothing above or beside it. The caption lives below 720 and
+     is therefore never in frame. */
+  html, body { margin: 0; background: #14141a; color: #b9b4c8;
+               font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  canvas { display: block; width: 720px; height: 720px; }
+  #cap { width: 720px; padding: 10px 0 24px; display: flex; gap: 10px; align-items: baseline; }
+  #cap b { color: #ffd2ec; font-weight: 600; }
+  #cap span { color: #6f6a80; }
+  #load { position: fixed; top: 320px; left: 0; width: 720px; text-align: center;
+          color: #d8d4e4; font-size: 13px; }
+</style>
+
+<canvas id="c"></canvas>
+<div id="cap"><b id="cap-name">—</b><span id="cap-note"></span><span style="flex:1"></span><span>← → to step</span></div>
+<div id="load">baking plates…</div>
+
+<script>
+'use strict';
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Drawing studies — the craft layer for this project's films.
+
+   Each study is a scene in the same engine the films use, so anything that
+   looks right here looks right in a film. Studies 0-5 are A/B: the left half
+   is how this project has been drawing, the right half is the technique under
+   test. Studies 6-8 are whole pictures built from the kit.
+
+   The engine block below is copied verbatim from the print engine of an
+   earlier film. Do not improve it here; improve it in a film and re-copy.
+
+   Read docs/drawing.md for what each study proves.
+     node shoot.mjs ../studies/index.html --sheet --cell 340
+     node shoot.mjs ../studies/index.html --times 3
+   ───────────────────────────────────────────────────────────────────────── */
+
+const CSS  = 720;            // styled size
+const W    = 1080;           // backing store; halftone pitch is defined here
+const DUR  = 28.0;
+const BEAT = 0.5;            // 120 BPM
+
+const PAPER = '#F2EDE3';
+const INK = {
+  blue:   '#0078BF',
+  pink:   '#FF48B0',
+  yellow: '#FFE800',
+  green:  '#00A95C',
+  orange: '#FF6C2F',
+  violet: '#765BA7',
+  indigo: '#2E3192',
+};
+
+/* Screen angles as rational tangents (b/a). A rotated dot grid only repeats
+   seamlessly on a rational tangent, so these are the real angles rather than
+   the nominal 15/45/75 — any other value leaves a visible seam where the
+   pattern tile wraps. */
+const SCREEN = {
+  blue:   { a: 4, b: 1 },   // 14.0°
+  pink:   { a: 1, b: 4 },   // 76.0°
+  yellow: { a: 1, b: 0 },   //  0.0°
+  green:  { a: 1, b: 1 },   // 45.0°
+  orange: { a: 2, b: 1 },   // 26.6°
+  violet: { a: 1, b: 2 },   // 63.4°
+  indigo: { a: 1, b: 1 },   // 45.0°
+};
+const PITCH = 4.6;           // device px between dot centres
+
+/* Registration: each plate misses by a fixed amount, in device px. */
+const REG = {
+  blue:   [ 1.5, -1.0], pink:   [-2.5,  2.0], yellow: [ 2.0,  1.5],
+  green:  [-1.5, -1.5], orange: [ 1.0,  2.0], violet: [-2.0, -1.0],
+  indigo: [ 0.0,  0.0],
+};
+
+/* Alternate colourways for the rewind: a swap remaps which physical plate a
+   logical ink prints on, so a scene replays in different inks without being
+   redrawn. */
+const SWAPS = {
+  swap1: { blue: 'pink', pink: 'blue', yellow: 'violet', green: 'orange',
+           orange: 'green', violet: 'yellow', indigo: 'green' },
+  swap2: { blue: 'violet', pink: 'green', yellow: 'orange', green: 'pink',
+           orange: 'yellow', violet: 'blue', indigo: 'pink' },
+  // Act V prints on two plates only.
+  duo: { blue: 'blue', pink: 'pink', yellow: 'pink', green: 'blue',
+         orange: 'pink', violet: 'blue', indigo: 'blue' },
+};
+
+/* Which of the seven each scene belongs to. The archive groups by this, so a
+   family reads as a run of medallions along an orbit. */
+const FAMILY = {
+  koi: 'blue', jellyfish: 'blue', wave: 'blue', whale: 'blue', 'rain-pond': 'blue',
+  telephone: 'pink', radio: 'pink',
+  'cricket-moon': 'yellow', lighthouse: 'yellow', campfire: 'yellow', fireworks: 'yellow',
+  'sunflower-bee': 'green', hummingbird: 'green',
+  bell: 'orange', kettle: 'orange', volcano: 'orange',
+  owl: 'violet', bats: 'violet', 'cat-window': 'violet',
+  telescope: 'indigo', 'ringed-planet': 'indigo',
+};
+
+const DOT_R = W * 0.011;     // 2.2% of frame width, diameter
+const CX = W / 2, CY = W / 2;
+const CORNER = Math.hypot(CX, CY);
+
+/* ── deterministic randomness ─────────────────────────────────────────────── */
+
+function mulberry32(a) {
+  return function () {
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+function hash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+const rngFor = (key) => mulberry32(hash(key));
+
+/** Smooth periodic wobble in θ, so a ring closes on itself without a seam. */
+function wobbler(key, harmonics = 3) {
+  const r = rngFor(key), h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, r() * 2 - 1, r() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, amp, ph]) => s + amp * Math.sin(k * th + ph), 0) / harmonics;
+}
+
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, u) => a + (b - a) * u;
+const easeOutCubic = (u) => 1 - Math.pow(1 - u, 3);
+const easeInOutCubic = (u) => u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+const easeOutBack = (u, s = 1.70158) => 1 + (s + 1) * Math.pow(u - 1, 3) + s * Math.pow(u - 1, 2);
+const easeInQuad = (u) => u * u;
+
+function cv(w, h) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  return c;
+}
+
+/* ── halftone screens ─────────────────────────────────────────────────────────
+   For screen angle tanθ = b/a the dot lattice is generated by the orthogonal
+   vectors P/√(a²+b²)·(a,b) and P/√(a²+b²)·(−b,a). That lattice contains
+   (P√(a²+b²), 0), so a square tile of side S = P√(a²+b²) repeats seamlessly and
+   holds exactly a²+b² dots.
+
+   Screens are anchored to canvas space, never to the object being drawn. A
+   screen that rides along with its subject makes the texture crawl, which is
+   the single most recognisable way this look goes wrong.                     */
+
+const screens = {};
+
+function buildScreen(name) {
+  const { a, b } = SCREEN[name];
+  const n = a * a + b * b;
+  const S = Math.max(2, Math.round(PITCH * Math.sqrt(n)));
+  const P = S / Math.sqrt(n);              // effective pitch after rounding
+  const u = P / Math.sqrt(n);
+  const v1 = [u * a, u * b], v2 = [-u * b, u * a];
+
+  // Lattice points reduced into the tile, plus wrapped neighbours so dots that
+  // straddle an edge are drawn on both sides.
+  const pts = [];
+  for (let m = -n; m <= n; m++) {
+    for (let k = -n; k <= n; k++) {
+      const x = m * v1[0] + k * v2[0], y = m * v1[1] + k * v2[1];
+      const wx = ((x % S) + S) % S, wy = ((y % S) + S) % S;
+      if (!pts.some(p => Math.abs(p[0] - wx) < 0.01 && Math.abs(p[1] - wy) < 0.01)) pts.push([wx, wy]);
+    }
+  }
+  const wrapped = [];
+  for (const [x, y] of pts) for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]) wrapped.push([x + dx, y + dy]);
+
+  // Threshold tile: a pixel takes ink when coverage exceeds π·d²/P², which is
+  // the coverage at which a dot of radius d would reach that pixel.
+  const th = new Float32Array(S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      let d2 = Infinity;
+      for (const [px, py] of wrapped) {
+        const dx = x + 0.5 - px, dy = y + 0.5 - py, q = dx * dx + dy * dy;
+        if (q < d2) d2 = q;
+      }
+      th[y * S + x] = clamp(Math.PI * d2 / (P * P), 0, 1);
+    }
+  }
+  return { S, P, pts, wrapped, th, patterns: new Map() };
+}
+
+function screenOf(name) {
+  return screens[name] || (screens[name] = buildScreen(name));
+}
+
+/** Tiled dot pattern at a quantised coverage, for live elements. */
+function dotPattern(ctx, name, coverage) {
+  const sc = screenOf(name);
+  const q = clamp(Math.round(coverage * 16), 0, 16);
+  if (!sc.patterns.has(q)) {
+    const t = cv(sc.S, sc.S), tx = t.getContext('2d');
+    const c = q / 16;
+    if (c >= 1) { tx.fillStyle = '#000'; tx.fillRect(0, 0, sc.S, sc.S); }
+    else if (c > 0) {
+      const r = sc.P * Math.sqrt(c / Math.PI);
+      tx.fillStyle = '#000';
+      for (const [x, y] of sc.wrapped) { tx.beginPath(); tx.arc(x, y, r, 0, Math.PI * 2); tx.fill(); }
+    }
+    sc.patterns.set(q, t);
+  }
+  const pat = ctx.createPattern(sc.patterns.get(q), 'repeat');
+  pat.setTransform(new DOMMatrix());   // pin to canvas space so it cannot swim
+  return pat;
+}
+
+/** Screen a greyscale coverage canvas into hard dots. Bake-time only. */
+function screenCoverage(covCanvas, name) {
+  const sc = screenOf(name);
+  const w = covCanvas.width, h = covCanvas.height;
+  const src = covCanvas.getContext('2d').getImageData(0, 0, w, h);
+  const s = src.data;
+  for (let y = 0; y < h; y++) {
+    const row = (y % sc.S) * sc.S;
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const cover = s[i + 3] / 255;
+      s[i + 3] = cover > sc.th[row + (x % sc.S)] ? 255 : 0;
+    }
+  }
+  const out = cv(w, h);
+  out.getContext('2d').putImageData(src, 0, 0);
+  return out;
+}
+
+/* ── ink passes ───────────────────────────────────────────────────────────────
+   Draw coverage into a scratch layer, screen it, tint it, then multiply it onto
+   the paper at that plate's registration offset. Darks come from stacking
+   plates; there is no black ink anywhere in the film.                         */
+
+const scratch = cv(W, W), sx = scratch.getContext('2d');
+
+/**
+ * opts.coverage — dot-screen density, for tonal areas.
+ * opts.alpha    — plate opacity, for fades.
+ * These are separate because punching a screen through a thin stroke reads as a
+ * broken line, not a lighter one; line work fades on alpha and width instead.
+ */
+function inkPass(ctx, name, opts, drawFn) {
+  const coverage = opts.coverage === undefined ? 1 : opts.coverage;
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+  sx.save();
+  drawFn(sx);
+  sx.restore();
+
+  if (coverage < 1) {                       // punch the dot screen out of the shape
+    sx.save();
+    sx.globalCompositeOperation = 'destination-in';
+    sx.fillStyle = dotPattern(sx, name, coverage);
+    sx.fillRect(0, 0, W, W);
+    sx.restore();
+  }
+  sx.save();                                // tint
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/* ── paper ────────────────────────────────────────────────────────────────────
+   Cloudy mottling rather than fine grain: the reference shows blotches a few
+   hundred px across at low contrast. Baked once, never recomputed, because any
+   per-frame regeneration flickers.                                           */
+
+let paper = null;
+
+function bakePaper() {
+  const c = cv(W, W), x = c.getContext('2d');
+  x.fillStyle = PAPER; x.fillRect(0, 0, W, W);
+
+  const r = rngFor('paper');
+
+  // Mottling is a warm wash with noisy alpha, not a neutral multiply: greyscale
+  // noise multiplied over cream desaturates it and reads as smoke rather than
+  // paper. Keep it subtle at full size and only obvious when zoomed.
+  for (const [res, maxA] of [[30, 0.10], [72, 0.075], [165, 0.05]]) {
+    const n = cv(res, res), nx = n.getContext('2d');
+    const img = nx.createImageData(res, res);
+    for (let i = 0; i < res * res; i++) {
+      img.data[i * 4] = 0xB4; img.data[i * 4 + 1] = 0xA6; img.data[i * 4 + 2] = 0x8C;
+      img.data[i * 4 + 3] = Math.pow(r(), 1.8) * 255 * maxA;
+    }
+    nx.putImageData(img, 0, 0);
+    x.save();
+    x.imageSmoothingEnabled = true;
+    x.imageSmoothingQuality = 'high';
+    x.drawImage(n, 0, 0, W, W);
+    x.restore();
+  }
+
+  x.save();                                  // fibres
+  x.strokeStyle = '#8a7f6a';
+  for (let i = 0; i < 420; i++) {
+    const px = r() * W, py = r() * W, len = 5 + r() * 22, ang = r() * Math.PI;
+    x.globalAlpha = 0.008 + r() * 0.016;
+    x.lineWidth = 0.5 + r() * 0.7;
+    x.beginPath();
+    x.moveTo(px, py);
+    x.quadraticCurveTo(px + Math.cos(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       py + Math.sin(ang) * len * 0.5 + (r() - 0.5) * 5,
+                       px + Math.cos(ang) * len, py + Math.sin(ang) * len);
+    x.stroke();
+  }
+  x.restore();
+
+  x.save();                                  // flecks
+  for (let i = 0; i < 2200; i++) {
+    x.globalAlpha = 0.012 + r() * 0.03;
+    x.fillStyle = r() < 0.55 ? '#7d7362' : '#ffffff';
+    x.beginPath();
+    x.arc(r() * W, r() * W, 0.4 + r() * 1.0, 0, Math.PI * 2);
+    x.fill();
+  }
+  x.restore();
+  return c;
+}
+
+/* ── marks ────────────────────────────────────────────────────────────────── */
+
+/** A ring that is never a true circle: low-frequency wobble on the radius. */
+function ringPath(ctx, cx, cy, r, wob, amp) {
+  ctx.beginPath();
+  ringAt(ctx, cx, cy, r, wob, amp);
+}
+
+/** Ripple: grows past the frame corner in ~0.6s, thinning and fading. */
+function drawRipple(ctx, cue, t) {
+  const u = clamp((t - cue.start) / cue.dur, 0, 1);
+  if (u <= 0 || u >= 1) return;
+  const e = easeOutCubic(u);
+  let cx = CX, cy = CY;
+  if (cue.from) { const p = dotPos(t, cue.from); cx = p[0]; cy = p[1]; }
+  const bold = cue.bold || 1;
+  const r = lerp(DOT_R * 0.9, cue.maxR || CORNER * 1.15, e);
+  const alpha = (u < 0.08 ? u / 0.08 : 1) * (1 - easeInQuad(clamp((u - 0.45) / 0.55, 0, 1)));
+  const width = lerp(4.6 * bold, 1.15 * bold, e);
+  const wob = wobbler(cue.seed);
+
+  inkPass(ctx, cue.ink, { alpha }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineWidth = width;
+    g.lineJoin = 'round';
+    ringPath(g, cx, cy, r, wob, 0.010);
+    g.stroke();
+  });
+  drawTicks(ctx, cue, cx, cy, r, e, alpha);
+}
+
+/** Vibration ticks: 2-3 short parallel arcs flicking just outside the rim. */
+function drawTicks(ctx, cue, cx, cy, r, e, alpha) {
+  const tr = rngFor(cue.seed + ':tick');
+  const spots = [];
+  for (let i = 0, n = 1 + Math.floor(tr() * 2); i < n; i++) spots.push(tr() * Math.PI * 2);
+  inkPass(ctx, cue.ink, { alpha: alpha * 0.8 }, (g) => {
+    g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    for (const th of spots) {
+      for (let k = 0; k < 3; k++) {
+        const rr = r * (1.035 + k * 0.028);
+        const span = 0.05 - k * 0.011;
+        g.lineWidth = lerp(2.8, 0.9, e) * (1 - k * 0.18);
+        g.beginPath();
+        g.arc(cx, cy, rr, th - span, th + span);
+        g.stroke();
+      }
+    }
+  });
+}
+
+/** The spine: indigo, with a pink plate escaping on its lower-left. */
+function drawDotAt(ctx, x, y, mainInk, r, coreInk, fringeInk) {
+  const fi = fringeInk || 'pink';
+  const wob = wobbler('dot:' + mainInk, 2);
+  const path = (g, rr, dx, dy) => {
+    g.beginPath();
+    ringAt(g, x + (dx || 0), y + (dy || 0), rr, wob, 0.035, 48);
+  };
+  // Only the crescent may print. Leaving a whole fringe disc under the dot works
+  // while the top ink is dark, but pink over yellow multiplies to orange across
+  // the entire dot -- so clear everything the main plate will cover.
+  // The offset comes from the two plates' registration alone.
+  const dx = REG[mainInk][0] - REG[fi][0], dy = REG[mainInk][1] - REG[fi][1];
+  inkPass(ctx, fi, {}, (g) => {
+    g.fillStyle = '#000';
+    path(g, r); g.fill();
+    g.globalCompositeOperation = 'destination-out';
+    path(g, r, dx, dy); g.fill();
+  });
+  inkPass(ctx, mainInk, {}, (g) => {
+    g.fillStyle = '#000';
+    path(g, r); g.fill();
+    if (coreInk) { g.globalCompositeOperation = 'destination-out'; path(g, r * 0.46); g.fill(); }
+  });
+  if (coreInk) {
+    inkPass(ctx, coreInk, {}, (g) => { g.fillStyle = '#000'; path(g, r * 0.46); g.fill(); });
+  }
+}
+
+function drawDot(ctx, t, scale = 1) {
+  drawDotAt(ctx, CX, CY, 'indigo', DOT_R * scale);
+}
+
+/* ── scene drawing helpers ────────────────────────────────────────────────────
+   Scenes draw coverage in 1080-space and alpha is tone, so 0.4 means a 40%
+   dot screen. Shape helpers carry hand wobble; nothing here is a true circle
+   or a straight line.                                                        */
+
+function makeWob(rng, harmonics = 3) {
+  const h = [];
+  for (let i = 0; i < harmonics; i++) h.push([2 + i, rng() * 2 - 1, rng() * Math.PI * 2]);
+  return (th) => h.reduce((s, [k, a, p]) => s + a * Math.sin(k * th + p), 0) / harmonics;
+}
+
+const tone = (g, a) => { g.globalAlpha = clamp(a, 0, 1); };
+
+/** Append a wobbly ring to the current path. */
+function ringAt(g, cx, cy, r, wob, amp = 0.02, steps = 0) {
+  const n = steps || clamp(Math.round(r * 0.8), 40, 300);
+  for (let i = 0; i <= n; i++) {
+    const th = i / n * Math.PI * 2;
+    const rr = r * (1 + wob(th) * amp);
+    const x = cx + Math.cos(th) * rr, y = cy + Math.sin(th) * rr;
+    i ? g.lineTo(x, y) : g.moveTo(x, y);
+  }
+  g.closePath();
+}
+
+function blob(g, cx, cy, r, rng, amp = 0.06) {
+  g.beginPath();
+  ringAt(g, cx, cy, r, makeWob(rng, 3), amp);
+}
+
+/** Hand-drawn polyline: wobbled control points, not a ruled edge. */
+function hand(g, pts, rng, amp = 2.5) {
+  g.beginPath();
+  for (let i = 0; i < pts.length; i++) {
+    const [x, y] = pts[i];
+    const jx = x + (rng() - 0.5) * amp * 2, jy = y + (rng() - 0.5) * amp * 2;
+    i ? g.lineTo(jx, jy) : g.moveTo(jx, jy);
+  }
+}
+
+/** Concentric sound/light/water arcs — the motif that rhymes with the ripples. */
+function arcsFan(g, cx, cy, r0, dr, n, a0, a1, lw, rng) {
+  for (let i = 0; i < n; i++) {
+    g.lineWidth = lw * (1 - i * 0.12);
+    g.beginPath();
+    const r = r0 + i * dr, j = rng ? (rng() - 0.5) * 0.05 : 0;
+    g.arc(cx, cy, r, a0 + j, a1 + j);
+    g.stroke();
+  }
+}
+
+/* ── scene registry ───────────────────────────────────────────────────────── */
+
+const SCENES = {};
+const scene = (id, def) => { SCENES[id] = Object.assign({ id, live: null }, def); };
+
+const baked = new Map();
+
+/**
+ * Bake a scene to one opaque bitmap: every plate screened, tinted, offset and
+ * multiplied onto white, ready to multiply over paper.
+ *
+ * Baked at its display size, never scaled afterwards. Resampling a halftoned
+ * bitmap beats the dot grid against the pixel grid and moirés; real print
+ * screens at final size too.
+ */
+function bakeScene(id, size, swap) {
+  const key = id + '@' + size + (swap ? ':' + swap : '');
+  if (baked.has(key)) return baked.get(key);
+  const sc = SCENES[id];
+  const k = size / W;
+  const out = cv(size, size), o = out.getContext('2d');
+  o.fillStyle = '#fff';
+  o.fillRect(0, 0, size, size);
+
+  const cover = cv(size, size), g = cover.getContext('2d');
+  for (const ink of sc.inks) {
+    const plate = swap ? (SWAPS[swap][ink] || ink) : ink;
+    g.setTransform(k, 0, 0, k, 0, 0);
+    g.clearRect(0, 0, W, W);
+    g.globalAlpha = 1;
+    g.globalCompositeOperation = 'source-over';
+    g.fillStyle = g.strokeStyle = '#000';
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    g.save();
+    sc.plates(g, ink, rngFor(id + ':' + ink), rngFor(id + ':shape'));
+    g.restore();
+    starve(g, rngFor(id + ':' + ink + ':void'));
+
+    const dots = screenCoverage(cover, plate);
+    const tin = cv(size, size), tx = tin.getContext('2d');
+    tx.drawImage(dots, 0, 0);
+    tx.globalCompositeOperation = 'source-in';
+    tx.fillStyle = INK[plate];
+    tx.fillRect(0, 0, size, size);
+
+    const [rx, ry] = REG[plate];
+    o.save();
+    o.globalCompositeOperation = 'multiply';
+    o.drawImage(tin, rx, ry);
+    o.restore();
+  }
+  baked.set(key, out);
+  return out;
+}
+
+/**
+ * The archive's ink drain: re-print a baked scene as one blue plate, taken from
+ * its luminance so a bright area stays bright. Mapping every ink to blue instead
+ * would turn a yellow sky into solid dark.
+ */
+function bakeCyano(id, size) {
+  const key = 'cy:' + id + '@' + size;
+  if (baked.has(key)) return baked.get(key);
+  const src = bakeScene(id, size);
+  const c = cv(size, size), x = c.getContext('2d');
+  x.drawImage(src, 0, 0);
+  const img = x.getImageData(0, 0, size, size), d = img.data;
+  for (let i = 0; i < d.length; i += 4) {
+    const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114) / 255;
+    d[i] = 0x00; d[i + 1] = 0x78; d[i + 2] = 0xBF;
+    d[i + 3] = Math.round((1 - lum) * 255);
+  }
+  x.putImageData(img, 0, 0);
+  baked.set(key, c);
+  return c;
+}
+
+/** Ink starvation: evenly filled solids read as laser print, so drop flecks. */
+function starve(g, rng) {
+  g.save();
+  g.setTransform(1, 0, 0, 1, 0, 0);
+  g.globalCompositeOperation = 'destination-out';
+  const w = g.canvas.width, n = Math.round(w * 1.1);
+  for (let i = 0; i < n; i++) {
+    g.globalAlpha = 0.2 + rng() * 0.55;
+    g.beginPath();
+    g.arc(rng() * w, rng() * w, 0.5 + rng() * 2.0, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.restore();
+}
+
+/* ── craft kit ────────────────────────────────────────────────────────────────
+   Drawing vocabulary for scene plates. Copy this whole block into a new film,
+   between starve() and the scenes.
+
+   Shapes are Path2D values rather than marks on the context, so one shape can
+   be filled on one plate, knocked out of another and hatched on a third. That
+   is what plate discipline needs, and it removes the usual trap of rebuilding
+   a shape per ink and having the knockout miss.
+
+   Everything draws coverage in 1080-space: fill style is already '#000' and
+   globalAlpha is tone, so 0.4 means a 40% dot screen.                        */
+
+const TAU = Math.PI * 2;
+
+/* — shape builders ——————————————————————————————————————————————— */
+
+/** Catmull-Rom through pts, as a dense polyline. */
+function curve(pts, closed, per) {
+  per = per || 12;
+  const n = pts.length, out = [];
+  const at = (i) => pts[closed ? (i + n * 2) % n : clamp(i, 0, n - 1)];
+  const last = closed ? n : n - 1;
+  for (let i = 0; i < last; i++) {
+    const p0 = at(i - 1), p1 = at(i), p2 = at(i + 1), p3 = at(i + 2);
+    for (let k = 0; k < per; k++) {
+      const u = k / per, u2 = u * u, u3 = u2 * u;
+      out.push([
+        0.5 * (2 * p1[0] + (p2[0] - p0[0]) * u + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2
+               + (3 * p1[0] - p0[0] - 3 * p2[0] + p3[0]) * u3),
+        0.5 * (2 * p1[1] + (p2[1] - p0[1]) * u + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2
+               + (3 * p1[1] - p0[1] - 3 * p2[1] + p3[1]) * u3),
+      ]);
+    }
+  }
+  if (!closed) out.push(pts[n - 1].slice());
+  return out;
+}
+
+/** Points around an ellipse, for feeding cut(). */
+function ringPts(x, y, rx, ry, n, rot) {
+  const out = [], c = Math.cos(rot || 0), s = Math.sin(rot || 0);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU, px = Math.cos(th) * rx, py = Math.sin(th) * ry;
+    out.push([x + px * c - py * s, y + px * s + py * c]);
+  }
+  return out;
+}
+
+/**
+ * Closed hand-cut contour through control points: the silhouette builder.
+ * A shape made of arcs and ellipses reads as clip art however good the screen
+ * is, because every edge has the same machine curvature.
+ *   o.amp   edge waver in px — 2 is a drawn line, 8 is torn stock
+ *   o.tear  0..1 chance per sample of a deeper bite inward
+ */
+function cut(pts, rng, o) {
+  o = o || {};
+  const amp = o.amp === undefined ? 3 : o.amp, tear = o.tear || 0;
+  const c = curve(pts, true, o.per || 10), n = c.length;
+  let area = 0;
+  for (let i = 0; i < n; i++) {
+    const a = c[i], b = c[(i + 1) % n];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  const sgn = area > 0 ? 1 : -1;            // keep the normal pointing outward
+
+  /* Displace along the normal, then smooth: an unsmoothed tear lands on one
+     sample and reads as damage rather than as a bay in the edge. */
+  const w1 = makeWob(rng, 4), w2 = makeWob(rng, 9), d = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const th = i / n * TAU;
+    d[i] = (w1(th) + w2(th * 3) * 0.3) * amp;
+    if (tear && rng() < tear) d[i] -= amp * (1.4 + rng() * 1.6);
+  }
+  for (let pass = 0; pass < 2; pass++) {
+    const s = Float32Array.from(d);
+    for (let i = 0; i < n; i++) d[i] = (s[(i - 1 + n) % n] + s[i] * 2 + s[(i + 1) % n]) * 0.25;
+  }
+
+  const p = new Path2D();
+  for (let i = 0; i < n; i++) {
+    const a = c[(i - 1 + n) % n], b = c[(i + 1) % n];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const x = c[i][0] + sgn * ty * d[i], y = c[i][1] - sgn * tx * d[i];
+    i ? p.lineTo(x, y) : p.moveTo(x, y);
+  }
+  p.closePath();
+  return p;
+}
+
+/**
+ * Variable-width ribbon along a path, as a fillable shape. Canvas has no
+ * pressure, so a constant lineWidth is the default and it is what makes stems,
+ * branches, whiskers and rigging read as wire. wfn(u) returns half-width.
+ */
+function nib(pts, wfn, o) {
+  o = o || {};
+  const c = o.raw ? pts : curve(pts, false, o.per || 10);
+  const n = c.length, L = [], R = [];
+  for (let i = 0; i < n; i++) {
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    let tx = b[0] - a[0], ty = b[1] - a[1];
+    const m = Math.hypot(tx, ty) || 1; tx /= m; ty /= m;
+    const w = Math.max(0.01, wfn(i / (n - 1)));
+    L.push([c[i][0] - ty * w, c[i][1] + tx * w]);
+    R.push([c[i][0] + ty * w, c[i][1] - tx * w]);
+  }
+  const p = new Path2D();
+  p.moveTo(L[0][0], L[0][1]);
+  for (let i = 1; i < n; i++) p.lineTo(L[i][0], L[i][1]);
+  for (let i = n - 1; i >= 0; i--) p.lineTo(R[i][0], R[i][1]);
+  p.closePath();
+  return p;
+}
+
+/** Width profiles for nib(). */
+const wTip = (w) => (u) => w * (1 - u * u);                       // full, lifting to a point
+const wSwell = (w, at, k) => (u) => w * Math.exp(-Math.pow((u - at) / (k || 0.35), 2));
+const wLeaf = (w, skew) => (u) => w * Math.pow(Math.sin(Math.PI * Math.pow(u, skew || 0.55)), 1.15);
+
+/**
+ * Calligraphic width from a held nib: widest where the path runs across the
+ * nib's axis, thinnest where it runs along it. This is where hand-drawn line
+ * weight comes from, and it is what makes a contour read as drawn rather than
+ * traced. Pass the same polyline you give nib(), with raw: true.
+ */
+function wNib(c, w0, ang, floor) {
+  const n = c.length, f = floor === undefined ? 0.22 : floor;
+  return (u) => {
+    const i = clamp(Math.round(u * (n - 1)), 0, n - 1);
+    const a = c[Math.max(0, i - 1)], b = c[Math.min(n - 1, i + 1)];
+    const th = Math.atan2(b[1] - a[1], b[0] - a[0]);
+    return w0 * (f + (1 - f) * Math.abs(Math.sin(th - ang)));
+  };
+}
+
+/**
+ * A horizon band closed to the bottom of the frame: hills, treeline, roofline,
+ * wave. Stack several at falling tone and the air between them reads as depth.
+ *   o.amp  height of the undulation   o.freq  how many bumps across the frame
+ *   o.tilt fraction of W the far end drops   o.teeth adds a jagged octave
+ */
+function ridgeAt(y, o) {
+  const amp = o.amp === undefined ? 60 : o.amp;
+  const w = makeWob(o.rng, o.harm || 5), t = o.teeth ? makeWob(o.rng, 7) : null;
+  return (u) => y + w(u * (o.freq || 5)) * amp + (o.tilt || 0) * (u - 0.5) * W
+                + (t ? t(u * 37) * amp * 0.22 : 0);
+}
+
+/**
+ * Mountain profile: overlapping triangular peaks with a jagged octave on top,
+ * because a skyline built from smooth harmonics always reads as hills however
+ * tall it is. Same u -> y contract as ridgeAt, so ridge() takes either.
+ */
+function peaksAt(y, o) {
+  const amp = o.amp === undefined ? 90 : o.amp, n = o.n || 5, ps = [];
+  for (let i = 0; i < n; i++) {
+    ps.push({ c: (i + 0.5) / n + (o.rng() - 0.5) * 0.7 / n,
+              h: amp * (0.4 + o.rng() * 0.6), w: (0.55 + o.rng() * 0.9) / n,
+              lean: (o.rng() - 0.5) * 0.7 });
+  }
+  const jag = makeWob(o.rng, 8);
+  return (u) => {
+    let top = y;
+    for (const p of ps) {
+      const d = (u - p.c) / p.w;
+      const yy = y - p.h * Math.max(0, 1 - Math.abs(d)) * (1 + p.lean * (d > 0 ? 1 : -1));
+      if (yy < top) top = yy;
+    }
+    return top + jag(u * 26) * amp * 0.06;
+  };
+}
+
+/** x across the frame -> the u that ridgeAt takes, for planting on a skyline. */
+const ridgeU = (x) => (x + 60) / (W + 120);
+
+function ridge(y, o) {
+  o = o || {};
+  const f = typeof y === 'function' ? y : ridgeAt(y, o);
+  const n = o.n || 120, p = new Path2D();
+  p.moveTo(-60, W + 60);
+  for (let i = 0; i <= n; i++) p.lineTo(-60 + i / n * (W + 120), f(i / n));
+  p.lineTo(W + 60, W + 60);
+  p.closePath();
+  return p;
+}
+
+/* — paint operations ————————————————————————————————————————————— */
+
+/** Fill a shape at a tone. */
+function print(g, path, a) { tone(g, a === undefined ? 1 : a); g.fill(path); }
+
+/** Knock a shape out of the plate underneath it, at full coverage.
+    A knockout drawn at a tone leaves the screen's gaps behind, so the plate
+    below shows through the holes — always clear solid. */
+function carve(g, path) {
+  g.save();
+  g.globalAlpha = 1;
+  g.globalCompositeOperation = 'destination-out';
+  g.fill(path);
+  g.restore();
+}
+
+/**
+ * Print a shape at an exact tone, clearing whatever the plate already holds
+ * beneath it. Tones on one plate add where they overlap, so a stack of ridges
+ * drawn back to front ends up solid at the bottom of the frame — which looks
+ * like a colour band rather than land. Every plane in a depth stack goes
+ * through here.
+ */
+function plane(g, path, a) { carve(g, path); print(g, path, a); }
+
+/** Outline a shape. Line work fades on width and alpha, never on coverage. */
+function keyline(g, path, w, a) {
+  tone(g, a === undefined ? 1 : a);
+  g.lineWidth = w === undefined ? 3 : w;
+  g.stroke(path);
+}
+
+/**
+ * Tone ramp inside a shape — a coverage gradient, which the screen turns into
+ * a dot-size ramp. This is the signature riso gesture and neither film uses it.
+ * Baked plates only: a live inkPass screens at one flat coverage, so a gradient
+ * there prints smooth, which is the thing the brief forbids.
+ *   o.stops  [[at, tone], ...]      o.x0,y0,x1,y1  linear
+ *   o.x,y,r0,r  radial
+ */
+function shade(g, path, o) {
+  g.save();
+  if (path) g.clip(path);
+  const grd = o.r !== undefined
+    ? g.createRadialGradient(o.x, o.y, o.r0 || 0, o.x, o.y, o.r)
+    : g.createLinearGradient(o.x0, o.y0, o.x1, o.y1);
+  for (const [at, a] of o.stops) grd.addColorStop(clamp(at, 0, 1), 'rgba(0,0,0,' + clamp(a, 0, 1) + ')');
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.globalAlpha = 1;
+  g.fillStyle = grd;
+  g.fillRect(-W, -W, W * 3, W * 3);
+  g.restore();
+}
+
+/**
+ * Parallel hatching clipped to a shape: tone made of line rather than dot.
+ * Next to the screen it reads as engraving, and it is how a mid-value stops
+ * being flat without adding another ink.
+ *   o.gap px between lines   o.w width   o.ang radians   o.a tone
+ *   o.fade(u) 0..1 thins across the run, for a shaded edge
+ *   o.cut hatches into the knockout instead, which is dry-brush at gap 3-5
+ */
+function hatch(g, path, rng, o) {
+  o = o || {};
+  const gap = o.gap || 10, span = W * 1.6;
+  const w = o.w || 2.2, a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (path) g.clip(path);
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  g.translate(CX, CY); g.rotate(o.ang === undefined ? -0.5 : o.ang); g.translate(-CX, -CY);
+  g.lineCap = 'round';
+  const n = Math.ceil(span * 2 / gap);
+  for (let i = 0; i < n; i++) {
+    const u = i / (n - 1), f = o.fade ? clamp(o.fade(u), 0, 1) : 1;
+    if (f <= 0.02) continue;
+    g.globalAlpha = a * f;
+    g.lineWidth = w * (0.72 + rng() * 0.5) * clamp(f, 0.3, 1);
+    const y = CY - span + i * gap + (rng() - 0.5) * gap * 0.3;
+    g.beginPath();
+    for (let k = 0; k <= 7; k++) {
+      const x = CX - span + span * 2 * k / 7, yy = y + (rng() - 0.5) * 2.4;
+      k ? g.lineTo(x, yy) : g.moveTo(x, yy);
+    }
+    g.stroke();
+  }
+  g.restore();
+}
+
+/**
+ * Stipple inside a shape — a gradient made of grain instead of dots, for
+ * spray, mist, sand, snow, and the bloom where ink feathers at an edge.
+ * o.density(x, y) returns 0..1 and is the whole point: without it this is noise.
+ */
+function spray(g, path, rng, o) {
+  o = o || {};
+  const n = o.n || 900, r0 = o.r0 || 0.8, r1 = o.r1 || 3.0;
+  const b = o.box || [0, 0, W, W], a = o.a === undefined ? 1 : o.a;
+  g.save();
+  if (o.cut) g.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < n; i++) {
+    const x = b[0] + rng() * b[2], y = b[1] + rng() * b[3];
+    const d = o.density ? o.density(x, y) : 1;
+    const keep = rng() < d, rr = r0 + rng() * (r1 - r0), av = 0.45 + rng() * 0.55;
+    if (!keep || (path && !g.isPointInPath(path, x, y))) continue;
+    g.globalAlpha = a * av;
+    g.beginPath();
+    g.arc(x, y, rr, 0, TAU);
+    g.fill();
+  }
+  g.restore();
+}
+
+/* There is no model() helper here on purpose. Shading a form by laying a second
+   ink across its shade side is the obvious move and it is wrong: study 3 in that
+   form printed an orange ball olive-brown. Model with shade(…, {cut: true}) on
+   the subject's own plate instead, and spend a second ink only on the smallest
+   darkest accent. */
+
+/** Contact shadow. A subject that does not touch its ground reads as a decal. */
+function bed(g, x, y, rx, ry, rng, a) {
+  const t = a === undefined ? 0.55 : a;
+  shade(g, cut(ringPts(x, y, rx, ry, 10), rng, { amp: rx * 0.06 }),
+        { x: x, y: y, r0: 0, r: rx, stops: [[0, t], [0.5, t * 0.5], [1, 0]] });
+}
+
+/* ── motion kit ───────────────────────────────────────────────────────────────
+   How a scene behaves, as against how it is drawn. Copy this block into a film
+   after the craft kit; it depends on clamp, lerp, cv, W, TAU, INK, REG, paper,
+   dotPattern and wobbler.
+
+   Two constraints shape everything in it:
+   - A frame is a pure function of t. State carried between frames breaks the
+     contract and verify.mjs catches it; an rng drawn per frame does not break
+     the contract, is not caught, and makes texture crawl. Vary in t, not in
+     frame count — wander() is the primitive for it.
+   - A live element screens at one flat coverage, so shade() cannot reach it.
+     Spatial tone on something that moves is bandPass().                      */
+
+/** Local 0..1 for an event at t0 lasting dur. Every timed thing starts here. */
+const phase = (t, t0, dur) => clamp((t - t0) / dur, 0, 1);
+
+/**
+ * Quantise time only when the chosen animation style needs held drawings.
+ * On twos means 2/deliveryFPS: 1/12 at 24 fps, 1/15 at 30 fps.
+ * Cuts follow the new film's rhythm; no universal beat grid is required.
+ */
+const hold = (t, step) => Math.floor(t / step + 1e-9) * step;
+
+/* There is no easeInBack here on purpose. Anticipation staged as an easing
+   curve on the travel is a shape sliding backwards; study 10 got it by giving
+   the bird a crouch to hold and a branch to load, which is a pose and a phase,
+   not a curve. Reach for a curve only once the pose exists. */
+const easeOutQuad = (u) => 1 - (1 - u) * (1 - u);   // thrown: leaves fast, then coasts
+
+/**
+ * Mass arriving somewhere and ringing down. Anything with weight that stops
+ * against something — a lid, a released branch, a landed bird, a float — rings
+ * past its rest and comes back. easeOutCubic merely decelerates, which reads as
+ * a machine parking, and is the wrong default for everything that has weight.
+ *   o.bounces  half-cycles before rest: 1 a heavy lid, 2 a branch, 3 a whisker
+ *   o.damp     higher is stiffer
+ */
+function settle(u, o) {
+  if (u <= 0) return 0;
+  if (u >= 1) return 1;
+  o = o || {};
+  const n = o.bounces === undefined ? 2 : o.bounces, k = o.damp === undefined ? 5 : o.damp;
+  const f = (x) => 1 - Math.exp(-k * x) * Math.cos(n * Math.PI * x);
+  return f(u) + (1 - f(1)) * u;                  // land exactly on 1
+}
+
+/**
+ * Deterministic wander in t: one sine stack sampled at t, never a fresh rng
+ * draw per frame. This is what lets a flame, a flag or a water surface vary
+ * without crawling. Periodic with period 1/hz, so anything driven by it loops
+ * seamlessly; give separate parts separate keys or they all breathe together.
+ */
+const wander = (key, hz, harmonics) => {
+  const w = wobbler(key, harmonics || 3);
+  return (t) => w(TAU * hz * t);
+};
+
+const scratch2 = cv(W, W), s2x = scratch2.getContext('2d');
+
+/**
+ * Spatial tone on a live element. inkPass screens a whole pass at one flat
+ * coverage: a gradient drawn into it survives as dots of constant size at
+ * varying opacity, which prints as smooth ink — the one thing this look cannot
+ * afford. Bands give the dot ramp back. Each band is its own quantised
+ * coverage, so the dot itself steps up across the form.
+ *
+ * bands are [{coverage, draw(g)}, …], lightest first, each one a region rather
+ * than a gradient. A band clears what earlier bands left where it lands,
+ * because two screens overlapping print denser than either — the same reason
+ * plane() exists for baked plates. A band at coverage 0 is therefore a
+ * knockout, which is how a live highlight gets back to bare paper.
+ *
+ * Four steps read as a ramp at 1080. dotPattern quantises to 1/16, so steps
+ * closer than 0.06 apart are the same band drawn twice. Each band costs one
+ * full-canvas pattern fill, so this is for the one element in the frame that is
+ * both moving and modelled, not for everything that moves.
+ */
+function bandPass(ctx, name, opts, bands) {
+  opts = opts || {};
+  const alpha = opts.alpha === undefined ? 1 : opts.alpha;
+  if (alpha <= 0.001) return;
+
+  sx.setTransform(1, 0, 0, 1, 0, 0);
+  sx.globalAlpha = 1;
+  sx.globalCompositeOperation = 'source-over';
+  sx.clearRect(0, 0, W, W);
+
+  for (const b of bands) {
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.lineCap = 'round';
+    s2x.lineJoin = 'round';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+
+    sx.save();                                   // this band owns its value
+    sx.globalCompositeOperation = 'destination-out';
+    sx.drawImage(scratch2, 0, 0);
+    sx.restore();
+
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    if (c < 1) {
+      s2x.save();
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+      s2x.restore();
+    }
+    sx.drawImage(scratch2, 0, 0);
+  }
+
+  sx.save();
+  sx.globalCompositeOperation = 'source-in';
+  sx.fillStyle = INK[name];
+  sx.fillRect(0, 0, W, W);
+  sx.restore();
+
+  const [ox, oy] = REG[name];
+  ctx.save();
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.globalAlpha = clamp(alpha, 0, 1);
+  ctx.drawImage(scratch, ox, oy);
+  ctx.restore();
+}
+
+/**
+ * Put paper back under a live light. Every live pass multiplies, so a bright
+ * moving element over a printed night can only get brighter by taking the night
+ * away first; a pale ink screened straight over it prints mud.
+ *
+ * The opening is banded for the same reason ink is: a soft-edged mask fades the
+ * night's dots in opacity instead of shrinking them, which is smooth ink by
+ * another route. Bands here union rather than accumulate — dotPattern grows one
+ * dot grid, so a lower coverage is a subset of a higher one — and name picks
+ * which screen the opening is cut on. Use the screen of the ink about to print
+ * over it, or the two grids beat.
+ *
+ * relight puts paper back over everything already in the frame, baked included.
+ * Anything inside the opening that must survive is drawn after it.
+ */
+function relight(ctx, name, bands) {
+  for (const b of bands) {
+    const c = clamp(b.coverage === undefined ? 1 : b.coverage, 0, 1);
+    if (c <= 0.001) continue;
+    s2x.setTransform(1, 0, 0, 1, 0, 0);
+    s2x.globalAlpha = 1;
+    s2x.globalCompositeOperation = 'source-over';
+    s2x.clearRect(0, 0, W, W);
+    s2x.fillStyle = s2x.strokeStyle = '#000';
+    s2x.save();
+    b.draw(s2x);
+    s2x.restore();
+    if (c < 1) {
+      s2x.globalCompositeOperation = 'destination-in';
+      s2x.fillStyle = dotPattern(s2x, name, c);
+      s2x.fillRect(0, 0, W, W);
+    }
+    s2x.globalCompositeOperation = 'source-in';
+    s2x.drawImage(paper, 0, 0);
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.drawImage(scratch2, 0, 0);
+    ctx.restore();
+  }
+}
+
+/* ── studies ──────────────────────────────────────────────────────────────────
+   Left half: how this project has been drawing. Right half: the technique.
+   Same inks, same screen, same frame, so the difference is the drawing.     */
+
+const HALF = W / 2, QL = W * 0.25, QR = W * 0.75;
+
+/* A silhouette assembled from primitives carries their curvature: every edge
+   is a machine arc, the joins read as bumps, and no part of the outline says
+   what the subject is doing. The same bird drawn as one contour through
+   deliberate points — with a doubled point where an edge needs a corner —
+   reads at a glance and reads as drawn. */
+const BIRD = [
+  [-148, -28], [-148, -28],                 // beak tip: a doubled point makes a corner
+  [-112, -46], [-88, -72], [-42, -92], [12, -78], [66, -44], [96, -14],
+  [206, 26], [216, 50], [216, 50],          // tail: a long wedge, not a fan
+  [92, 34], [46, 62], [-18, 74], [-78, 52], [-116, 6], [-146, -12],
+];
+
+scene('silhouette', {                 // 0 — primitives vs one cut contour
+  inks: ['blue', 'indigo', 'orange'],
+  plates(g, ink, rng, sr) {
+    const cy = W * 0.44, k = 1.16;
+    const body = cut(BIRD.map(([x, y]) => [QR + x * k, cy + y * k]), sr, { amp: 3.2 });
+    const wing = cut([[-40, -44], [30, -30], [104, 8], [120, 30], [120, 30], [34, 18], [-20, -6]]
+                     .map(([x, y]) => [QR + x * k, cy + y * k]), sr, { amp: 2.6 });
+    const perch = (x) => nib([[x - 240, cy + 152], [x, cy + 148], [x + 250, cy + 156]], wSwell(9, 0.5, 0.9));
+
+    if (ink === 'blue') {
+      tone(g, 1);                                   // left: body, head, beak, tail as primitives
+      g.beginPath(); g.ellipse(QL + 6, cy + 4, 118, 86, -0.12, 0, TAU); g.fill();
+      g.beginPath(); g.arc(QL - 86, cy - 54, 62, 0, TAU); g.fill();
+      g.beginPath();
+      g.moveTo(QL - 172, cy - 32); g.lineTo(QL - 118, cy - 74); g.lineTo(QL - 116, cy - 18);
+      g.closePath(); g.fill();
+      g.beginPath(); g.ellipse(QL + 168, cy + 46, 88, 26, 0.42, 0, TAU); g.fill();
+
+      print(g, body, 1);                            // right: one contour, one gesture
+      carve(g, nib([[QR - 96, cy + 4], [QR - 20, cy + 40], [QR + 74, cy + 30]], wSwell(4, 0.5, 0.8)));
+    }
+
+    if (ink === 'indigo') {
+      tone(g, 1);                                   // left: wing and eye as more ellipses
+      g.beginPath(); g.ellipse(QL + 24, cy + 2, 82, 40, 0.3, 0, TAU); g.fill();
+      g.beginPath(); g.arc(QL - 104, cy - 66, 11, 0, TAU); g.fill();
+
+      print(g, wing, 1);                            // right: the wing follows the body's line
+      hatch(g, wing, sr, { ang: 0.42, gap: 9, w: 2.4, a: 1, cut: true });
+      g.beginPath(); g.arc(QR - 104, cy - 62, 12, 0, TAU); tone(g, 1); g.fill();
+    }
+
+    if (ink === 'orange') {
+      tone(g, 0.85);
+      g.lineWidth = 7; g.lineCap = 'round';         // left: ruled legs and a ruled perch
+      g.beginPath();
+      g.moveTo(QL - 10, cy + 84); g.lineTo(QL - 22, cy + 146);
+      g.moveTo(QL + 34, cy + 80); g.lineTo(QL + 30, cy + 146);
+      g.stroke();
+      g.beginPath(); g.moveTo(QL - 240, cy + 150); g.lineTo(QL + 250, cy + 150); g.stroke();
+
+      print(g, nib([[QR - 14, cy + 70], [QR - 20, cy + 112], [QR - 34, cy + 150]], wTip(7)), 0.9);
+      print(g, nib([[QR + 34, cy + 64], [QR + 32, cy + 110], [QR + 40, cy + 150]], wTip(7)), 0.9);
+      print(g, perch(QR), 0.9);
+    }
+  },
+});
+
+scene('stroke', {                     // 1 — constant width vs tapered ribbon
+  inks: ['green', 'pink'],
+  plates(g, ink, rng, sr) {
+    const stem = (x) => [[x, W * 0.88], [x - 26, W * 0.68], [x + 18, W * 0.46], [x - 6, W * 0.26]];
+    const leafAt = (x, y, dx, dy) => [[x, y], [x + dx * 0.45, y + dy - 26], [x + dx, y + dy]];
+
+    if (ink === 'green') {
+      g.lineCap = 'round';
+      g.lineWidth = 9;                              // left: one width for everything
+      const l = stem(QL);
+      g.beginPath();
+      const cl = curve(l, false, 10);
+      cl.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+      g.stroke();
+      for (const [x, y, dx, dy] of [[QL - 12, W * 0.62, -110, -40], [QL + 10, W * 0.44, 120, -34],
+                                    [QL - 4, W * 0.32, -92, -52]]) {
+        g.beginPath();
+        const c = curve(leafAt(x, y, dx, dy), false, 8);
+        c.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+        g.stroke();
+      }
+
+      const r = stem(QR);                           // right: thick at the root, lifting at the tip
+      print(g, nib(r, (u) => 13 * (1 - u * 0.78)), 1);
+      for (const [x, y, dx, dy, w] of [[QR - 12, W * 0.62, -110, -40, 30], [QR + 10, W * 0.44, 120, -34, 34],
+                                       [QR - 4, W * 0.32, -92, -52, 26]]) {
+        print(g, nib(leafAt(x, y, dx, dy), wLeaf(w), { per: 14 }), 1);
+      }
+    }
+
+    if (ink === 'pink') {
+      const budL = [[QL - 6, W * 0.26], [QL + 4, W * 0.19], [QL - 14, W * 0.15]];
+      g.lineCap = 'round'; g.lineWidth = 9;
+      g.beginPath();
+      curve(budL, false, 8).forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+      g.stroke();
+      for (let i = 0; i < 5; i++) {                 // left: petals as ellipses
+        const a = -1.9 + i * 0.5;
+        g.beginPath();
+        g.ellipse(QL - 14 + Math.cos(a) * 34, W * 0.15 + Math.sin(a) * 34, 38, 15, a, 0, TAU);
+        g.fill();
+      }
+      const budR = [[QR - 6, W * 0.26], [QR + 4, W * 0.19], [QR - 14, W * 0.15]];
+      print(g, nib(budR, (u) => 11 * (1 - u * 0.5)), 1);
+      for (let i = 0; i < 5; i++) {                 // right: petals as tapered strokes off the joint
+        const a = -1.95 + i * 0.52, cx = QR - 14, cy = W * 0.15;
+        const tipx = cx + Math.cos(a) * 86, tipy = cy + Math.sin(a) * 86;
+        print(g, nib([[cx, cy], [cx + Math.cos(a - 0.3) * 50, cy + Math.sin(a - 0.3) * 50], [tipx, tipy]],
+                     wLeaf(24, 0.62), { per: 12 }), 1);
+      }
+    }
+  },
+});
+
+scene('ramp', {                       // 2 — flat tone vs dot-size gradient
+  inks: ['blue', 'orange', 'indigo'],
+  plates(g, ink, rng, sr) {
+    const sunY = W * 0.40, horiz = W * 0.70, sunR = 84;
+    const skyL = new Path2D(); skyL.rect(0, 0, HALF, horiz);
+    const skyR = new Path2D(); skyR.rect(HALF, 0, HALF, horiz);
+    const gndL = new Path2D(); gndL.rect(0, horiz, HALF, W - horiz);
+    const gndR = new Path2D(); gndR.rect(HALF, horiz, HALF, W - horiz);
+    const hill = ridge(horiz - 46, { rng: sr, amp: 58, freq: 2.6, harm: 4, tilt: 0.06 });
+    const sun = cut(ringPts(QR, sunY, sunR, sunR, 12), sr, { amp: 3 });
+
+    if (ink === 'blue') {
+      print(g, skyL, 0.45);                          // left: one flat screen for the whole sky
+      print(g, gndL, 0.8);
+      shade(g, skyR, { x0: 0, y0: 0, x1: 0, y1: horiz, stops: [[0, 0.95], [0.5, 0.45], [1, 0.08]] });
+      shade(g, gndR, { x0: 0, y0: horiz, x1: 0, y1: W, stops: [[0, 0.2], [1, 0.9]] });
+      /* The sun is cleared out of the sky with a soft-edged knockout, so the
+         halo fades into the screen instead of ending on a cut circle. Orange
+         printed straight over this blue would go brown, which is the left. */
+      shade(g, skyR, { cut: true, x: QR, y: sunY, r0: sunR * 0.4, r: sunR * 2.5,
+                       stops: [[0, 1], [0.36, 0.7], [1, 0]] });
+    }
+
+    if (ink === 'orange') {
+      tone(g, 1);
+      g.beginPath(); g.arc(QL, sunY, sunR, 0, TAU); g.fill();    // left: hard disc, no light
+      const half = new Path2D(); half.rect(HALF, 0, HALF, W);
+      shade(g, half, { x: QR, y: sunY, r0: sunR * 0.8, r: sunR * 3.6, stops: [[0, 0.72], [0.3, 0.24], [1, 0]] });
+      print(g, sun, 1);
+    }
+
+    if (ink === 'indigo') {                          // the same ridge both sides, so only tone differs
+      g.save(); g.beginPath(); g.rect(0, 0, HALF, horiz + 6); g.clip();
+      print(g, hill, 0.5);                           // left: one flat screen, so it sits flat
+      g.restore();
+      g.save(); g.beginPath(); g.rect(HALF, 0, HALF, horiz + 6); g.clip();
+      shade(g, hill, { x0: 0, y0: horiz - 46, x1: 0, y1: horiz + 6, stops: [[0, 0.5], [1, 0.1]] });
+      g.restore();                                   // right: haze eats the base, so it sits back
+    }
+  },
+});
+
+scene('form', {                       // 3 — flat silhouette vs modelled form
+  inks: ['orange', 'blue', 'indigo'],
+  plates(g, ink, rng, sr) {
+    const cy = W * 0.46, r = 148, gy = cy + r - 16;
+    const bodyL = cut(ringPts(QL, cy, r, r * 0.97, 11), sr, { amp: 4 });
+    const bodyR = cut(ringPts(QR, cy, r, r * 0.97, 11), sr, { amp: 4 });
+    const lx = -0.6, ly = -0.78;                     // light from the upper left
+    const hx = QR + lx * r * 0.5, hy = cy + ly * r * 0.5;
+
+    if (ink === 'orange') {
+      print(g, bodyL, 1);                            // left: one flat fill, and that is the whole shape
+      print(g, bodyR, 1);
+      /* Model by taking ink away toward the light rather than adding a second
+         ink over the shade side. The hue stays pure, every value is the same
+         plate at a different dot size, and it still reads as one printing. */
+      g.save();
+      g.clip(bodyR);
+      shade(g, null, { cut: true, x: hx, y: hy, r0: 0, r: r * 1.55,
+                       stops: [[0, 0.72], [0.45, 0.38], [1, 0]] });
+      g.restore();
+      carve(g, cut(ringPts(hx - 10, hy - 8, r * 0.14, r * 0.09, 8, -0.7), sr, { amp: 2 }));
+    }
+
+    if (ink === 'blue') {
+      const floor = new Path2D(); floor.rect(0, gy, W, W - gy);
+      shade(g, floor, { x0: 0, y0: gy, x1: 0, y1: W, stops: [[0, 0.1], [1, 0.3]] });
+      bed(g, QR + 16, gy + 2, r * 1.05, r * 0.17, sr, 0.5);     // right: it touches its ground
+    }
+
+    if (ink === 'indigo') {                          // one small deliberate overprint: the core shadow
+      g.save();
+      g.clip(bodyR);
+      shade(g, null, { x: QR - lx * r * 0.95, y: cy - ly * r * 0.95, r0: r * 0.1, r: r * 0.78,
+                       stops: [[0, 0.6], [1, 0]] });
+      shade(g, null, { cut: true, x: QR - lx * r * 1.3, y: cy - ly * r * 1.3, r0: 0, r: r * 0.55,
+                       stops: [[0, 1], [1, 0]] });    // light returning at the far rim
+      g.restore();
+    }
+  },
+});
+
+/* A flat fill is one value everywhere and the screen is the only texture in it.
+   Four marks break that up without adding an ink: a coverage ramp for the turn
+   of the form, hatching for the shaded flank, spray where an edge catches
+   light, and a dry-brush pass so the solid is not evenly inked. */
+const WHALE = [
+  [-206, 12], [-206, 12], [-158, -26], [-52, -52], [26, -46],
+  [52, -70], [52, -70], [74, -42],
+  [150, -16], [208, -64], [208, -64], [178, -4], [210, 52], [210, 52], [150, 18],
+  [44, 54], [-62, 60], [-152, 44],
+];
+
+scene('texture', {                    // 4 — flat screen vs marks inside the form
+  inks: ['blue', 'indigo', 'yellow'],
+  plates(g, ink, rng, sr) {
+    const cy = W * 0.5, k = 1.2;
+    const bodyL = cut(WHALE.map(([x, y]) => [QL + x * k * 0.92, cy + y * k]), sr, { amp: 3 });
+    const bodyR = cut(WHALE.map(([x, y]) => [QR + x * k * 0.92, cy + y * k]), sr, { amp: 3 });
+    const belly = cut([[-150, 40], [-60, 58], [40, 52], [120, 22], [120, 40], [30, 76], [-70, 80], [-160, 56]]
+                      .map(([x, y]) => [QR + x * k * 0.92, cy + y * k]), sr, { amp: 3 });
+
+    if (ink === 'blue') {
+      print(g, bodyL, 0.8);                          // left: one screen, whole animal
+      print(g, bodyR, 1);
+      g.save();
+      g.clip(bodyR);
+      shade(g, null, { cut: true, x0: 0, y0: cy - 80 * k, x1: 0, y1: cy + 70 * k,
+                       stops: [[0, 0.55], [0.55, 0.12], [1, 0]] });   // light from above
+      hatch(g, belly, sr, { ang: 1.32, gap: 15, w: 4.2, cut: true,    // pleats, as removed ink
+                            fade: (u) => clamp(1.6 - Math.abs(u - 0.42) * 2.2, 0, 1) });
+      hatch(g, bodyR, sr, { ang: -0.28, gap: 9, w: 1.3, a: 0.3, cut: true,     // dry pass
+                            fade: (u) => clamp(1.4 - u * 2.2, 0, 1) });
+      /* Spray only where the light already is. Stipple spread over a whole
+         form eats the silhouette, which is worth more than any texture. */
+      spray(g, bodyR, sr, { cut: true, n: 900, r0: 0.7, r1: 2.4, a: 0.85,
+                            box: [QR - 250, cy - 80, 210, 90],
+                            density: (x, y) => clamp(1.1 - Math.hypot(x - (QR - 210), (y - (cy - 44)) * 1.6) / 130, 0, 1) });
+      g.restore();
+    }
+
+    if (ink === 'indigo') {
+      tone(g, 1);                                    // left: an ellipse eye and nothing else
+      g.beginPath(); g.arc(QL - 150, cy - 6, 9, 0, TAU); g.fill();
+
+      g.save();                                      // right: one small overprint under the jaw
+      g.clip(bodyR);
+      shade(g, null, { x0: 0, y0: cy + 10 * k, x1: 0, y1: cy + 70 * k, stops: [[0, 0], [1, 0.5]] });
+      g.restore();
+      g.beginPath(); g.arc(QR - 150, cy - 8, 10, 0, TAU); tone(g, 1); g.fill();
+      print(g, nib([[QR - 200, cy + 16], [QR - 150, cy + 30], [QR - 96, cy + 34]], wTip(3.4)), 0.9);
+    }
+
+    if (ink === 'yellow') {                          // a light that only lands on the right
+      g.save();
+      g.clip(bodyR);
+      shade(g, null, { x: QR - 10 * k, y: cy - 58 * k, r0: 10, r: 150, stops: [[0, 0.55], [1, 0]] });
+      g.restore();
+    }
+  },
+});
+
+/* Distance is the cheapest thing a picture can own and the films spend it on
+   nothing: a subject on a flat ground has no air in it. Four planes at falling
+   coverage, one occluder cropped by the frame, and haze eating each skyline
+   put the same subject in a world. */
+scene('depth', {                      // 5 — flat ground vs staged planes
+  inks: ['blue', 'indigo', 'green'],
+  plates(g, ink, rng, sr) {
+    const horiz = W * 0.62;
+    const far = peaksAt(W * 0.56, { rng: sr, amp: 150, n: 6 });
+    const mid = ridgeAt(W * 0.60, { rng: sr, amp: 38, freq: 3.1, harm: 5, tilt: 0.05 });
+    const near = ridgeAt(W * 0.74, { rng: sr, amp: 30, freq: 1.8, harm: 3, tilt: -0.03 });
+    const tree = (x, y, h, w0) => nib([[x, y], [x - h * 0.06, y - h * 0.55], [x + h * 0.04, y - h]], wTip(w0));
+    const canopy = (x, y, r) => cut(ringPts(x, y, r * 1.15, r, 9), sr, { amp: r * 0.12, tear: 0.05 });
+
+    if (ink === 'blue') {
+      const skyL = new Path2D(); skyL.rect(0, 0, HALF, horiz);
+      print(g, skyL, 0.4);                           // left: one flat sky, one flat ground
+      g.save(); g.beginPath(); g.rect(HALF, 0, HALF, W); g.clip();
+      const skyR = new Path2D(); skyR.rect(HALF, 0, HALF, W * 0.82);
+      shade(g, skyR, { x0: 0, y0: 0, x1: 0, y1: W * 0.8, stops: [[0, 0.8], [0.52, 0.14], [1, 0.02]] });
+      carve(g, ridge(near, {}));                     // the field prints on bare paper, not on sky
+      g.restore();
+    }
+
+    if (ink === 'indigo') {
+      g.save(); g.beginPath(); g.rect(HALF, 0, HALF, W); g.clip();
+      /* The furthest land is the one plane that must not clear what is behind
+         it. Printed over the blue sky it inherits the sky's value and cools
+         with distance, which is what haze does; its own ramp sinks its base
+         into the horizon. Every nearer plane clears what it stands in front of. */
+      shade(g, ridge(far, {}), { x0: 0, y0: W * 0.4, x1: 0, y1: W * 0.58,
+                                 stops: [[0, 0.3], [1, 0.02]] });
+      plane(g, ridge(mid, {}), 0.3);
+      for (let i = 0; i < 30; i++) {                 // a treeline read only as scale and value
+        const x = HALF - 10 + i * 19 + (sr() - 0.5) * 11;
+        plane(g, tree(x, mid(ridgeU(x)) + 5, 15 + sr() * 13, 2.4), 0.52);
+      }
+      shade(g, null, { cut: true, x0: 0, y0: W * 0.58, x1: 0, y1: W * 0.72,
+                       stops: [[0, 0], [1, 0.85]] });
+
+      /* The occluder: nearest, darkest, cropped by two edges of the frame, and
+         carrying no detail at all. It costs four shapes and buys the air that
+         everything behind it is standing in. */
+      plane(g, nib([[W + 30, 28], [W * 0.88, 70], [W * 0.76, 48], [W * 0.66, -10]], wTip(24)), 1);
+      for (const [bx, by, br] of [[W * 0.975, 80, 50], [W * 0.885, 28, 40], [W * 0.79, 74, 34],
+                                  [W * 0.705, 24, 36], [W * 0.845, 96, 22]]) {
+        plane(g, canopy(bx, by, br), 1);
+      }
+      g.restore();
+    }
+
+    if (ink === 'green') {
+      tone(g, 1);                                    // left: ground band and a tree on it
+      g.beginPath(); g.rect(0, horiz, HALF, W - horiz); g.fill();
+      g.beginPath(); g.rect(QL - 8, horiz - 150, 16, 150); g.fill();
+      g.beginPath(); g.arc(QL, horiz - 172, 74, 0, TAU); g.fill();
+
+      g.save(); g.beginPath(); g.rect(HALF, 0, HALF, W); g.clip();
+      plane(g, ridge(near, {}), 0.5);                // the plane the subject stands on
+      const gy = near(ridgeU(QR + 40)) + 30;
+      const cp = canopy(QR + 30, gy - 212, 94);
+      plane(g, tree(QR + 40, gy + 8, 200, 13), 1);
+      plane(g, cp, 1);
+      hatch(g, cp, sr, { ang: -0.9, gap: 8, w: 2.2, cut: true,
+                         fade: (u) => clamp(u * 1.8 - 0.25, 0, 1) });
+      bed(g, QR + 46, gy + 10, 98, 15, sr, 0.45);
+      plane(g, ridge(ridgeAt(W * 0.99, { rng: sr, amp: 46, freq: 1.5, harm: 3, tilt: 0.06 }), {}), 1);
+      g.restore();
+    }
+  },
+});
+
+/* ── exemplars ────────────────────────────────────────────────────────────────
+   Whole pictures built from the kit. Two rework scenes this project has on
+   record as weak, and they are reworked by composition before technique: a
+   viewpoint, a moment, a value anchor and a place for the centre dot.       */
+
+/* An earlier film drew a kettle as an orange ellipse floating on a flat tile
+   grid, lit from nowhere. Same subject, taken as the instant it whistles: low
+   and left so the steam has somewhere to go, the spout aimed at the centre dot
+   so the dot becomes the source of the sound, a hob under it for the darkest
+   value in the frame, and the steam printed as the absence of wall. */
+scene('kettle', {                     // 6
+  inks: ['green', 'orange', 'yellow', 'indigo'],
+  plates(g, ink, rng, sr) {
+    const bx = 292, by = 792, hobY = W * 0.865;
+    const P = (x, y) => [bx + x, by + y];
+    /* A kettle is a flat base, a full belly and a flat shoulder for the lid.
+       An ellipse has none of those and reads as fruit. */
+    const body = cut([P(-146, 172), P(-146, 172), P(-192, 96), P(-200, 6), P(-160, -92),
+                      P(-96, -148), P(-20, -166), P(58, -156), P(126, -108), P(180, -20),
+                      P(168, 92), P(132, 168), P(132, 168)], sr, { amp: 4 });
+    const spout = nib([P(96, -6), P(196, -74), P(214, -168), [CX - 2, CY + 10]],
+                      (u) => 46 - u * 32, { per: 18 });
+    const cap = cut(ringPts(CX + 4, CY + 2, 30, 22, 8, -0.7), sr, { amp: 2.5 });
+    const lid = cut([P(-104, -158), P(-40, -180), P(40, -176), P(84, -152), P(84, -136),
+                     P(-20, -150), P(-104, -140)], sr, { amp: 2.5 });
+    const knob = cut(ringPts(bx + 12, by - 196, 26, 22, 8), sr, { amp: 2.5 });
+    const handle = nib([P(-128, -22), P(-120, -190), P(-4, -250), P(104, -192), P(118, -34)],
+                       wSwell(13, 0.5, 0.7), { per: 20 });
+    const steam = [];
+    for (let i = 0; i < 4; i++) {
+      const s = 1 - i * 0.13, dx = 24 + i * 32, sw = (i % 2 ? -1 : 1) * 32;
+      steam.push(nib([[CX + dx, CY - 6], [CX + dx + 48 + sw, CY - 124 * s],
+                      [CX + dx + 20 - sw, CY - 244 * s], [CX + dx + 74 + sw, CY - 356 * s]],
+                     wLeaf(14 - i * 1.6, 0.42), { per: 20 }));
+    }
+    const kettle = [body, spout, cap, lid, knob, handle];
+
+    if (ink === 'green') {                           // tiled wall, and everything cut out of it
+      const wall = new Path2D(); wall.rect(0, 0, W, hobY);
+      shade(g, wall, { x0: W, y0: W, x1: 0, y1: 0, stops: [[0, 0.14], [1, 0.5]] });
+      g.save();
+      g.clip(wall);
+      for (let i = 0; i <= 11; i++) {                // grout is removed ink, never a drawn line
+        carve(g, nib([[i * 104 + 8, -20], [i * 104 + 2, hobY + 20]], () => 4.5, { per: 6 }));
+        carve(g, nib([[-20, i * 104 + 8], [W + 20, i * 104 + 2]], () => 4.5, { per: 6 }));
+      }
+      g.restore();
+      for (const p of kettle) carve(g, p);
+      for (const p of steam) carve(g, p);            // steam is the wall not printing
+      /* Open the wall around the whistle before the yellow lands on it. Yellow
+         over green prints lime; on bare paper it prints as light. */
+      shade(g, null, { cut: true, x: CX, y: CY, r0: 24, r: 196, stops: [[0, 1], [0.5, 0.85], [1, 0]] });
+      spray(g, null, sr, { cut: true, n: 1400, r0: 1, r1: 4.4, a: 0.7,
+                           box: [CX - 40, CY - 430, 560, 470],
+                           density: (x, y) => clamp(1 - Math.hypot(x - CX - 190, (y - CY + 190) * 0.8) / 330, 0, 1) });
+    }
+
+    if (ink === 'orange') {
+      print(g, body, 1);
+      print(g, spout, 1);
+      print(g, cap, 1);
+      print(g, lid, 1);
+      g.save();
+      g.clip(body);                                  // light from the upper left, taken out of the fill
+      shade(g, null, { cut: true, x: bx - 96, y: by - 118, r0: 0, r: 360,
+                       stops: [[0, 0.6], [0.5, 0.28], [1, 0]] });
+      g.restore();
+      carve(g, cut(ringPts(bx - 92, by - 54, 38, 88, 9, -0.44), sr, { amp: 3 }));
+      hatch(g, lid, sr, { ang: 0.1, gap: 9, w: 2.6, cut: true });
+    }
+
+    if (ink === 'yellow') {                          // the whistle, and the flame under the hob
+      shade(g, null, { x: CX, y: CY, r0: 6, r: 168, stops: [[0, 0.85], [0.34, 0.3], [1, 0]] });
+      g.lineCap = 'round';
+      arcsFan(g, CX, CY, 66, 30, 2, -2.0, -0.62, 7, sr);
+      arcsFan(g, CX, CY, 74, 30, 2, 0.3, 1.85, 6, sr);
+      shade(g, null, { x: bx + 10, y: hobY + 26, r0: 16, r: 240, stops: [[0, 0.7], [1, 0]] });
+      for (const p of kettle) carve(g, p);
+    }
+
+    if (ink === 'indigo') {
+      const hob = new Path2D(); hob.rect(0, hobY, W, W - hobY);
+      print(g, hob, 0.85);                           // the darkest value in the frame, and it is a shape
+      shade(g, null, { x: bx, y: hobY + 8, r0: 10, r: 300, stops: [[0, 0.45], [1, 0]] });
+      for (const p of kettle) carve(g, p);           // the kettle stands in front of the hob
+      bed(g, bx + 10, by + 182, 172, 22, sr, 0.75);
+      print(g, handle, 1);
+      print(g, knob, 1);
+      g.save();
+      g.clip(body);                                  // one small overprint: the turn away from the light
+      shade(g, null, { x: bx + 128, y: by + 82, r0: 20, r: 196, stops: [[0, 0.62], [1, 0]] });
+      shade(g, null, { cut: true, x: bx + 196, y: by + 126, r0: 0, r: 104,
+                       stops: [[0, 1], [1, 0]] });
+      g.restore();
+      keyline(g, spout, 2.5, 0.45);
+      print(g, nib([P(-104, -140), P(-20, -150), P(84, -136)], wSwell(4, 0.5, 0.8)), 0.55);  // lid lip
+      print(g, cut(ringPts(CX, CY, DOT_R, DOT_R, 10), sr, { amp: 1.2 }), 1);   // the film's dot lands here
+    }
+  },
+});
+
+/* An earlier film recorded `wave` as weak: "the curl does not read as a barrel".
+   A barrel is not a shape, it is an opening — so the darkest value in the frame
+   is the hole, the lip is a thick ribbon thrown over it, the face is one ramp
+   with foam carved along its flow, and the sun comes through the thin water at
+   the crest. The centre dot sits at the far end of the tube, where the eye
+   already wants to go. A gull gives the whole thing its size. */
+scene('wave', {                       // 7
+  inks: ['blue', 'green', 'yellow', 'indigo'],
+  plates(g, ink, rng, sr) {
+    /* The lip is a tongue of water: thick where it leaves the crest, tapering
+       as it is thrown forward, hooking under at the tip. Discs and crescents
+       both read as a ball here; the taper is the whole difference. The opening
+       is then a pocket shape with the lip carved off its top and the water off
+       its bottom, so its edges belong to the things around it. */
+    /* The ribbon's blunt starting end has to begin deep inside the water, or it
+       prints as a flat cut across the face. */
+    const lip = nib([[328, 812], [366, 558], [452, 400], [596, 394], [684, 518], [630, 654]],
+                    (u) => 9 + 96 * Math.pow(1 - u, 1.25), { per: 24 });
+    /* The opening is a lens with two sharp ends. An ellipse in this position
+       reads as a ball however it is shaded; the points are what say aperture. */
+    const pocket = cut([[306, 532], [306, 532], [426, 456], [556, 486], [646, 598], [646, 598],
+                        [528, 642], [402, 606]], sr, { amp: 3.5 });
+    const fingers = [];
+    for (let i = 0; i < 5; i++) {
+      const a = -0.5 + i * 0.30, L = 150 + (i % 2) * 64;
+      fingers.push(nib([[618, 640], [618 + Math.cos(a) * L * 0.55, 640 + Math.sin(a) * L * 0.5 - 30],
+                        [618 + Math.cos(a) * L, 640 + Math.sin(a) * L - 12]],
+                       wTip(15 - i), { per: 14 }));
+    }
+    const mass = cut([[-70, 1150], [-70, 940], [40, 866], [150, 764], [222, 682],
+                      [276, 606], [276, 606], [386, 648], [536, 700], [744, 768],
+                      [1150, 838], [1150, 1150]], sr, { amp: 4.5, per: 14 });
+    const foam = [];
+    for (let i = 0; i < 5; i++) {
+      const d = i * 54;
+      foam.push(nib([[-20 + d * 0.3, 1010 - d * 0.5], [210 + d * 0.8, 900 - d * 0.55],
+                     [430 + d, 876 - d * 0.4]], wSwell(8 - i * 0.8, 0.45, 0.7), { per: 16 }));
+    }
+    const gx = 846, gy = 248, gull = [
+      nib([[gx, gy], [gx - 52, gy - 26], [gx - 104, gy + 4]], wLeaf(11, 0.5), { per: 14 }),
+      nib([[gx, gy], [gx + 48, gy - 28], [gx + 98, gy + 2]], wLeaf(11, 0.5), { per: 14 }),
+    ];
+
+    if (ink === 'blue') {
+      const sky = new Path2D(); sky.rect(0, 0, W, 860);
+      shade(g, sky, { x0: 0, y0: 0, x1: 0, y1: 800, stops: [[0, 0.26], [1, 0.02]] });
+      plane(g, lip, 1);                              // the tongue, then the face in front of it
+      for (const p of fingers) plane(g, p, 1);       // foam thrown off the tip, tapering to nothing
+      plane(g, mass, 1);
+      g.save();
+      g.clip(lip);                                   // the lip thins toward its throwing edge
+      shade(g, null, { cut: true, x: 470, y: 342, r0: 30, r: 300, stops: [[0, 0.6], [1, 0]] });
+      g.restore();
+      g.save();
+      g.clip(mass);                                  // the face turns: light at the crest, deep below
+      shade(g, null, { cut: true, x0: 0, y0: 600, x1: 0, y1: 1010, stops: [[0, 0.6], [1, 0]] });
+      g.restore();
+      for (const p of foam) carve(g, p);             // foam is water not printing
+      spray(g, null, sr, { cut: true, n: 1600, r0: 1, r1: 4.4, a: 0.7,
+                           box: [150, 208, 620, 262],
+                           density: (x, y) => clamp(1 - Math.hypot((x - 462) * 0.5, y - 300) / 190, 0, 1) });
+      spray(g, null, sr, { n: 2400, r0: 1.2, r1: 4.4, a: 0.9,
+                           box: [40, 110, 820, 290],
+                           density: (x, y) => clamp(1.05 - Math.hypot((x - 486) * 0.46, y - 266) / 260, 0, 1) });
+    }
+
+    if (ink === 'green') {                           // the water's own colour, only where it is thick
+      g.save();
+      g.clip(mass);
+      shade(g, null, { x0: 0, y0: 620, x1: 0, y1: 1080, stops: [[0, 0], [1, 0.5]] });
+      g.restore();
+      g.save();
+      g.clip(lip);
+      shade(g, null, { x0: 290, y0: 320, x1: 660, y1: 644, stops: [[0, 0], [1, 0.52]] });
+      g.restore();
+    }
+
+    if (ink === 'yellow') {                          // sun through the thin water at the crest
+      g.save();
+      g.clip(lip);
+      shade(g, null, { x: 458, y: 370, r0: 16, r: 250, stops: [[0, 0.85], [1, 0]] });
+      g.restore();
+      shade(g, pocket, { x: 606, y: 616, r0: 10, r: 168, stops: [[0, 0.6], [1, 0]] });
+      carve(g, lip);
+      carve(g, mass);
+    }
+
+    if (ink === 'indigo') {                          // the opening is the darkest thing in the frame
+      /* The ramp has to start inside the part of the pocket that survives the
+         two carves, or the darkest end of it is hidden and the opening prints
+         as a bright patch instead of a hole. */
+      shade(g, pocket, { x: 488, y: 492, r0: 12, r: 232, stops: [[0, 0.95], [0.5, 0.48], [1, 0.06]] });
+      carve(g, lip);                                 // the opening's edges belong to the lip above it
+      carve(g, mass);                                // and to the water across its bottom
+      g.save();
+      g.clip(mass);
+      shade(g, null, { x0: 0, y0: 880, x1: 0, y1: 1150, stops: [[0, 0], [1, 0.4]] });
+      g.restore();
+      for (const p of gull) print(g, p, 1);
+      print(g, cut(ringPts(CX, CY, DOT_R, DOT_R, 10), sr, { amp: 1.2 }), 1);
+    }
+  },
+});
+
+/* An earlier film recorded `telescope` as weak: "dish, mast and galaxy still
+   compete". Three things the same size in the same frame always compete. The
+   fix is scale, not detail: give the sky nine tenths of the frame, drop the
+   dishes to thumbnails on the horizon, and let the thing they are listening to
+   be the only bright object — on the centre dot, which becomes its core. The
+   galaxy is stipple density along two log spirals, which is a gradient made of
+   grain and reads as riso in a way a smooth glow never does. */
+scene('telescope', {                  // 8
+  inks: ['indigo', 'violet', 'pink', 'yellow'],
+  plates(g, ink, rng, sr) {
+    const horizon = peaksAt(W * 0.965, { rng: sr, amp: 62, n: 7 });
+    const land = ridge(horizon, {});
+    const arm = (k) => (x, y) => {
+      const dx = x - CX, dy = (y - CY) * 1.62, r = Math.hypot(dx, dy);
+      if (r < 22 || r > 272) return 0;
+      const want = Math.log(r / 20) * 1.25 + k;
+      let d = ((Math.atan2(dy, dx) - want + Math.PI) % TAU + TAU) % TAU - Math.PI;
+      return clamp(1 - Math.abs(d) / 0.75, 0, 1) * clamp(1.3 - r / 272, 0, 1);
+    };
+    const dish = (x, y, s, a) => {                   // a thumbnail, not a subject
+      const c = Math.cos(a), si = Math.sin(a);
+      return [
+        cut(ringPts(x + c * 26 * s, y - 40 * s - si * 26 * s, 46 * s, 15 * s, 9, a), sr, { amp: 1.5 }),
+        nib([[x, y + 10 * s], [x, y - 40 * s]], (u) => (7 - u * 3) * s, { per: 6 }),
+        nib([[x - 22 * s, y + 12 * s], [x + 22 * s, y + 12 * s]], () => 5 * s, { per: 4 }),
+      ];
+    };
+
+    /* The galaxy is flattened, so its glow and the hole it opens in the sky have
+       to be flattened too: scale the context and a radial gradient becomes an
+       ellipse. Clipping a round gradient to an ellipse would end it on a hard
+       edge instead. */
+    const oval = (fn) => { g.save(); g.translate(CX, CY); g.scale(1, 0.62); g.translate(-CX, -CY); fn(); g.restore(); };
+
+    if (ink === 'indigo') {
+      const sky = new Path2D(); sky.rect(0, 0, W, W);
+      /* Hold the sky's own ramp shallow and spend the range near the horizon,
+         where the dishes need something to silhouette against. Screen dots
+         touch at coverage π/4, so most of the visible change in a night sky
+         happens in the bottom half of the scale. */
+      shade(g, sky, { x0: 0, y0: 0, x1: 0, y1: W * 0.99, stops: [[0, 0.84], [0.58, 0.78], [0.92, 0.34], [1, 0.3]] });
+      spray(g, null, sr, { cut: true, n: 5200, r0: 0.7, r1: 2.3, a: 0.85,   // stars are holes
+                           box: [0, 0, W, W * 0.92], density: () => 0.5 });
+      oval(() => shade(g, null, { cut: true, x: CX, y: CY, r0: 14, r: 250,
+                                 stops: [[0, 0.46], [0.45, 0.26], [1, 0]] }));
+      plane(g, land, 1);                             // the ridge owns the bottom edge, one flat value
+      /* Stand them on the skyline, not at a guessed y: below the ridge they are
+         solid ink inside solid ink and simply are not there. */
+      for (const [x, s, a] of [[188, 2.4, -0.5], [382, 1.5, -0.34], [512, 1.0, -0.62]]) {
+        for (const p of dish(x, horizon(ridgeU(x)) + 8, s, a)) plane(g, p, 1);
+      }
+    }
+
+    if (ink === 'violet') {                          // the haze the spiral sits in
+      oval(() => shade(g, null, { x: CX, y: CY, r0: 18, r: 248, stops: [[0, 0.6], [0.4, 0.26], [1, 0]] }));
+      carve(g, land);
+    }
+
+    if (ink === 'pink') {                            // two arms, as grain rather than as a shape
+      for (const k of [0, Math.PI]) {
+        spray(g, null, sr, { n: 14000, r0: 1, r1: 3.4, a: 0.95,
+                             box: [CX - 290, CY - 190, 580, 380], density: arm(k) });
+      }
+      carve(g, land);
+    }
+
+    if (ink === 'yellow') {
+      shade(g, null, { x: CX, y: CY, r0: 5, r: 84, stops: [[0, 0.95], [0.4, 0.4], [1, 0]] });
+      spray(g, null, sr, { n: 900, r0: 0.9, r1: 2.6, a: 0.8,      // a few stars take the warm ink
+                           box: [0, 0, W, W * 0.9], density: () => 0.09 });
+      carve(g, land);
+    }
+  },
+});
+
+/* Motion studies. The inspection unit is a strip, not a frame:
+   node shoot.mjs ../studies/index.html --range 9:9.9:0.1 --sheet --cols 5 --cell 300
+   Read the spacing between cells, not the cells. Even spacing is the tell. */
+
+const GY = 700, ST = 66;
+const GPTS = [[-60, 714], [190, 698], [540, 708], [880, 694], [1140, 710]];
+const STONE = cut(ringPts(0, 0, 56, 47, 9), rngFor('weight:stone'), { amp: 5 });
+const LEAF = nib([[-96, 16], [-40, -16], [30, -22], [96, 4]], wLeaf(30, 0.6), { per: 8 });
+const BANK = cut([[-70, 1012], [110, 964], [330, 1004], [560, 956], [790, 998], [1010, 960],
+                  [1150, 1002], [1150, 1160], [-70, 1160]],
+                 rngFor('weight:bank'), { amp: 9, per: 12, tear: 0.05 });
+const DUST = (() => {                          // seeded once: per-frame draws crawl
+  const r = rngFor('weight:dust'), d = [];
+  for (let i = 0; i < 14; i++) {
+    const a = (-0.12 - r() * 0.8) * Math.PI * (r() < 0.5 ? 1 : -1);
+    d.push([Math.cos(a) * (90 + r() * 150), Math.sin(a) * (80 + r() * 110), 4 + r() * 7]);
+  }
+  return d;
+})();
+
+/* Both halves cover the same ground in the same second. On the left one curve
+   drives everything: the two objects fall at the same even rate and stop dead
+   together, which is the procedural default and reads as a lift descending. On
+   the right the stone accelerates, arrives early and hard, and throws grit;
+   the leaf is at terminal velocity from the first frame and is still in the air
+   when the strip ends. The difference lives in arrival and in what the arrival
+   disturbs — over ten cells linear and quadratic mid-fall look alike. */
+scene('weight', {
+  inks: ['indigo', 'orange'],
+  plates(g, ink, rng, sr) {
+    const land = cut(GPTS.concat([[1140, 1140], [-60, 1140]]), sr, { amp: 2.5, per: 14 });
+    const lip = nib(GPTS, wSwell(7, 0.45, 1.1), { per: 14 });
+    if (ink === 'indigo') {
+      plane(g, land, 0.4);
+      hatch(g, land, rng, { gap: 30, w: 2.2, ang: -0.05, a: 0.2, fade: (v) => clamp(1.3 - v * 1.5, 0, 1) });
+      print(g, lip, 0.8);
+      plane(g, BANK, 0.88);                      /* nearest plane: darkest, no interior, cropped */
+    }
+    if (ink === 'orange') print(g, BANK, 0.62);
+  },
+  live(ctx, u) {
+    const one = phase(u, 0, 0.5);                  // left: one curve for everything
+    const lStone = [168, lerp(ST, GY - 46, one)];
+    const lLeaf = [382, lerp(ST - 6, GY - 20, one), 0];
+
+    const fall = easeInQuad(phase(u, 0, 0.45));    // right: gravity, and a hard stop
+    const rStone = [708, lerp(ST, GY - 46, fall)];
+    const d = phase(u, 0.45, 0.4);                 // what the arrival disturbs
+
+    const lu = phase(u, 0.02, 0.98);               // right: terminal velocity plus a swing
+    const sw = Math.sin(TAU * 1.15 * lu + 0.5);
+    const stall = lu - 0.055 * Math.sin(TAU * 2.3 * lu);
+    const rLeaf = [922 + sw * 78, lerp(ST - 6, GY - 20, stall), sw * 0.85 + 0.15];
+
+    const stones = (g) => {
+      for (const [x, y] of [lStone, rStone]) { g.save(); g.translate(x, y); g.fill(STONE); g.restore(); }
+    };
+    inkPass(ctx, 'indigo', { coverage: 0.42 }, (g) => {
+      const on = (y) => clamp((y - (GY - 120)) / 70, 0, 1);
+      for (const [x, y] of [lStone, rStone]) {
+        const k = on(y);
+        if (k <= 0.02) continue;
+        g.globalAlpha = k;
+        g.beginPath(); g.ellipse(x, GY - 2, 62 * k, 11 * k, 0, 0, TAU); g.fill();
+      }
+    });
+    inkPass(ctx, 'indigo', { coverage: 1 }, (g) => {
+      stones(g);
+      if (d > 0 && d < 1) {                        // grit thrown out, then falling back
+        g.globalAlpha = 1 - d * d;
+        for (const [vx, vy, rr] of DUST) {
+          const x = 708 + vx * d, y = GY - 34 + vy * d + 360 * d * d;
+          g.beginPath(); g.arc(x, y, rr * (1 - d * 0.55), 0, TAU); g.fill();
+        }
+      }
+    });
+    inkPass(ctx, 'orange', { coverage: 0.6 }, (g) => {
+      stones(g);
+      for (const [x, y, r] of [lLeaf, rLeaf]) {
+        g.save(); g.translate(x, y); g.rotate(r); g.fill(LEAF); g.restore();
+      }
+    });
+  },
+});
+
+const BIRDP = cut(BIRD, rngFor('launch:bird'), { amp: 3.4 });
+const WING = nib([[-10, 0], [60, -46], [148, -62], [214, -30]], wLeaf(34, 0.7), { per: 8 });
+const SEDGE = cut([[-70, 1024], [150, 998], [380, 1018], [610, 994], [840, 1016], [1150, 996],
+                   [1150, 1160], [-70, 1160]], rngFor('launch:edge'), { amp: 8, per: 12, tear: 0.05 });
+
+/* A departure is three events, and procedural motion usually draws only the
+   middle one. Both birds start on the same branch and end in the same place at
+   the same instant; everything that differs is inside the second.
+   Left: it translates away at one rate, and the branch it left never notices —
+   every part of the frame that is not the subject is inert, which is why so
+   much of this project reads as cut-outs sliding.
+   Right: it gathers first, so the leaving has somewhere to come from, and it
+   pays for the delay with speed. The branch carries the departure on after the
+   bird has gone; its loaded rest is not its unloaded rest, which is what makes
+   the whip read as release rather than as a wobble. */
+scene('launch', {
+  inks: ['indigo', 'orange'],
+  plates(g, ink, rng, sr) {
+    if (ink === 'indigo') {
+      plane(g, SEDGE, 0.86);
+      hatch(g, SEDGE, rng, { gap: 9, w: 2, ang: 0.28, a: 1, cut: true, fade: (v) => clamp(1.4 - v * 2.6, 0, 1) });
+    }
+    if (ink === 'orange') print(g, SEDGE, 0.6);
+  },
+  live(ctx, u) {
+    const LOAD = 56;
+    const branch = (x0, b) => nib([[x0 - 46, 1034], [x0 + 92, 902 + b * 0.16], [x0 + 212, 762 + b * 0.52],
+                                   [x0 + 332, 590 + b]], wTip(21), { per: 12 });
+
+    const lb = LOAD;                               // left: the branch never notices
+    const lp = phase(u, 0, 1);                     // and the bird leaves at one rate
+
+    const c = easeInQuad(phase(u, 0, 0.3));        // right: gather, go, and ring down after
+    const rb = u < 0.3 ? lerp(LOAD, 118, c)
+                       : lerp(118, 0, settle(phase(u, 0.3, 0.7), { bounces: 3, damp: 4.2 }));
+    const rp = easeOutQuad(phase(u, 0.3, 0.7));
+
+    const perch = (x0, b, p, crouch) => {
+      const [dx, dy] = [60 * p, -520 * p + 52 * Math.sin(Math.PI * p)];
+      return [x0 + 322 + dx, 590 + b - 44 + crouch + dy, -(0.42 + 0.22 * p), p];
+    };
+    const lBird = perch(60, lb, lp, 0);
+    const rBird = perch(600, rb, rp, 15 * c);
+
+    const birds = (g) => {
+      for (const [x, y, rot, p] of [lBird, rBird]) {
+        g.save();
+        g.translate(x, y); g.rotate(rot); g.scale(-0.46, 0.46);
+        g.fill(BIRDP);
+        g.save();                                  // one wing, so the silhouette reads as flight
+        g.translate(-4, -46); g.rotate(-0.55 - 0.85 * Math.sin(TAU * 2.1 * p) * (p > 0 ? 1 : 0));
+        g.fill(WING);
+        g.restore();
+        g.restore();
+      }
+    };
+    inkPass(ctx, 'indigo', { coverage: 0.74 }, (g) => { g.fill(branch(60, lb)); g.fill(branch(600, rb)); });
+    inkPass(ctx, 'indigo', { coverage: 1 }, birds);
+    inkPass(ctx, 'orange', { coverage: 0.6 }, birds);
+  },
+});
+
+const FBASE = 830;
+const NIGHT = (() => { const p = new Path2D(); p.rect(-10, -10, W + 20, FBASE + 140); return p; })();   // underlaps the bed's wavy top edge
+const FIREBED = cut([[-70, 902], [170, 874], [420, 898], [660, 870], [900, 894], [1150, 872],
+                     [1150, 1160], [-70, 1160]], rngFor('flame:bed'), { amp: 9, per: 12, tear: 0.05 });
+
+/* The flame's shape is a function of t and nothing else. Three sine stacks at
+   different rates lick the contour; the hand-cut wobble comes from a key, not
+   from a draw, so the edge does not boil between frames. Period is exactly 1 s,
+   so the study loops. */
+const fwob = [wander('flame:a', 1), wander('flame:b', 2), wander('flame:c', 3)];
+function flame(cx, h, w, t, s) {
+  const [a, b, c] = fwob, H = h * s, W2 = w * s;
+  const tipx = cx + W2 * (0.12 + 0.34 * a(t + 0.27));
+  const tipy = FBASE - H * (0.98 + 0.07 * b(t));
+  return cut([
+    [cx - W2 * (0.96 + 0.1 * a(t)), FBASE],
+    [cx - W2 * (0.82 + 0.22 * b(t)), FBASE - H * 0.3],
+    [cx - W2 * (0.36 + 0.26 * c(t)), FBASE - H * 0.64],
+    [tipx, tipy], [tipx, tipy],                  // doubled: the tip keeps its point
+    [cx + W2 * (0.42 + 0.24 * c(t + 0.5)), FBASE - H * 0.58],
+    [cx + W2 * (0.86 + 0.16 * b(t + 0.2)), FBASE - H * 0.26],
+    [cx + W2 * (1.02 + 0.1 * a(t + 0.6)), FBASE],
+  ], rngFor('flame:cut'), { amp: H * 0.018, per: 8 });
+}
+
+/* The one thing the craft kit could not reach. inkPass screens a whole pass at
+   one flat coverage, so every animated element in both films is a flat screen:
+   the fire in an earlier film is an orange shape, not a fire. Left is that. Right is
+   the same flame at the same instant, put down as four bands at quantised
+   coverages — the dot grows step by step from the edge in, and the core is a
+   band at coverage 0, which is bare paper. The night under it is opened first
+   with relight(), because orange screened over indigo prints brown; the logs
+   are drawn after the opening, since relight puts paper back over everything
+   baked where it lands. */
+scene('flame', {
+  inks: ['indigo', 'orange'],
+  plates(g, ink, rng, sr) {
+    if (ink === 'indigo') {
+      print(g, NIGHT, 0.58);
+      shade(g, NIGHT, { x0: 0, y0: 0, x1: 0, y1: FBASE, stops: [[0, 0], [1, 0.12]], cut: true });
+      plane(g, FIREBED, 0.88);
+      hatch(g, FIREBED, rng, { gap: 10, w: 2, ang: 0.24, a: 1, cut: true, fade: (v) => clamp(1.3 - v * 2.4, 0, 1) });
+    }
+    if (ink === 'orange') print(g, FIREBED, 0.55);
+  },
+  live(ctx, u) {
+    const logs = (g) => {
+      for (const cx of [270, 810]) {
+        g.fill(nib([[cx - 150, 900], [cx - 20, 856], [cx + 128, 872]], wSwell(19, 0.45, 0.9), { per: 10 }));
+        g.fill(nib([[cx - 108, 878], [cx + 30, 900], [cx + 156, 858]], wSwell(15, 0.5, 0.9), { per: 10 }));
+      }
+    };
+    /* The bed is the nearest plane, so it occludes the light rather than taking
+       it: knocking it out of every opening and every glow band stops relight
+       putting paper back over it and stops yellow printing on top of it. */
+    const disc = (cx, r) => (g) => {
+      g.beginPath(); g.ellipse(cx, FBASE - 150, r, r * 0.94, 0, 0, TAU); g.fill();
+      g.globalCompositeOperation = 'destination-out';
+      g.fill(FIREBED);
+    };
+
+    /* right: open the night, step the glow out, step the flame in */
+    relight(ctx, 'orange', [
+      { coverage: 0.26, draw: disc(810, 262) },
+      { coverage: 0.52, draw: disc(810, 206) },
+      { coverage: 0.8, draw: disc(810, 152) },
+      { coverage: 1, draw: disc(810, 104) },
+    ]);
+    bandPass(ctx, 'yellow', {}, [
+      { coverage: 0.12, draw: disc(810, 248) },
+      { coverage: 0.22, draw: disc(810, 192) },
+      { coverage: 0.36, draw: disc(810, 140) },
+      { coverage: 0.54, draw: disc(810, 92) },
+    ]);
+    bandPass(ctx, 'orange', {}, [
+      { coverage: 0.3, draw: (g) => g.fill(flame(810, 360, 96, u, 1)) },
+      { coverage: 0.58, draw: (g) => g.fill(flame(810, 360, 96, u, 0.74)) },
+      { coverage: 0.88, draw: (g) => g.fill(flame(810, 360, 96, u, 0.5)) },
+      { coverage: 0, draw: (g) => g.fill(flame(810, 360, 96, u, 0.26)) },
+    ]);
+
+    /* left: one flat pass for the glow, one for the flame, over an unopened night */
+    inkPass(ctx, 'yellow', { coverage: 0.26 }, disc(270, 248));
+    inkPass(ctx, 'orange', { coverage: 0.72 }, (g) => g.fill(flame(270, 360, 96, u, 1)));
+
+    inkPass(ctx, 'indigo', { coverage: 0.96 }, logs);
+  },
+});
+
+/* ── sheet ────────────────────────────────────────────────────────────────── */
+
+const STUDIES = [
+  ['silhouette', 'assembled primitives | one cut contour'],
+  ['stroke', 'constant lineWidth | tapered nib ribbon'],
+  ['ramp',   'flat screen | coverage gradient as a dot ramp'],
+  ['form',   'flat silhouette | modelled, bedded, overprint core'],
+  ['texture', 'one flat screen | ramp, hatch, spray, dry pass'],
+  ['depth',  'subject on flat ground | four planes, haze, occluder'],
+  ['kettle', 'exemplar — the moment it whistles, dot as the source'],
+  ['wave',   'exemplar — a barrel is an opening, dot at the far end'],
+  ['telescope', 'exemplar — scale, not detail; dot as the galaxy core'],
+  ['weight', 'motion — one curve for everything | the curve each mass implies'],
+  ['launch', 'motion — it just leaves | anticipation, and what it leaves swinging'],
+  ['flame', 'live element — one flat coverage | stepped bands, on an opened ground'],
+];
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+canvas.width = canvas.height = W;
+canvas.style.width = canvas.style.height = CSS + 'px';
+
+const capName = document.getElementById('cap-name');
+const capNote = document.getElementById('cap-note');
+
+function render(t) {
+  const i = clamp(Math.floor(t + 1e-6), 0, STUDIES.length - 1);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.drawImage(paper, 0, 0);
+  ctx.globalCompositeOperation = 'multiply';
+  ctx.drawImage(bakeScene(STUDIES[i][0], W), 0, 0);
+  ctx.globalCompositeOperation = 'source-over';
+  const sc = SCENES[STUDIES[i][0]];
+  if (sc.live) { ctx.save(); sc.live(ctx, clamp(t - i, 0, 1)); ctx.restore(); }
+  capName.textContent = i + '  ' + STUDIES[i][0];
+  capNote.textContent = STUDIES[i][1];
+}
+
+let at = 0;
+addEventListener('keydown', (e) => {
+  if (e.code === 'ArrowRight') render(at = clamp(at + 1, 0, STUDIES.length - 1));
+  if (e.code === 'ArrowLeft') render(at = clamp(at - 1, 0, STUDIES.length - 1));
+});
+
+paper = bakePaper();
+for (const name of Object.keys(INK)) screenOf(name);
+
+window.__riso = { duration: STUDIES.length, ready: false, seek: render };
+
+(async function boot() {
+  const el = document.getElementById('load');
+  for (let i = 0; i < STUDIES.length; i++) {
+    el.textContent = 'baking plates… ' + (i + 1) + '/' + STUDIES.length;
+    await new Promise(r => setTimeout(r, 0));
+    bakeScene(STUDIES[i][0], W);
+  }
+  el.remove();
+  render(at = Number(new URLSearchParams(location.search).get('t')) || 0);
+  window.__riso.ready = true;
+})();
+</script>
+</html>
