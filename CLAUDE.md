@@ -53,6 +53,7 @@ exports mux `renderAudio()`. Firefox is the primary engine. `out/` is disposable
 | `films/window-seat/` | Showcase: sampled piano, piano-bank rebuild. |
 | `films/roost/` | One-take murmuration: analytic crowd, reflections, sampled strings. |
 | `films/held/` | Kite film: simulated rope, velocity-matched catch, CC0 samples. |
+| `films/nonpareil/` | Marbling film: closed-form marbling maps, perspective sheet peel, sampled handpan. |
 | `films/lumen/`, `films/emergence/`, `prints/workings/` | Finished examples; workings donates the print kit. |
 | `docs/` | Brief, visual development, drawing, scene space, motion, sound, quality bar. |
 | `studies/` | Craft, composition, scene-space and sound kits with A/B studies. |

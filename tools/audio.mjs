@@ -102,7 +102,10 @@ const win = Number(a.window || 1);
 const range = around !== null ? [Math.max(0, around - win), Math.min(wav.duration, around + win)] : [0, wav.duration];
 const spec = A.spectrogram(m, rate, { from: range[0], to: range[1], cols: 1600, rows: 240, nfft: around !== null ? 1024 : 2048 });
 const full = around !== null ? A.spectrogram(m, rate, { cols: 400, rows: 32 }) : spec;   // bands always over the whole score
-const clicks = A.clicks(chs, rate);
+// --around lists every discontinuity inside its window; the whole film keeps the 12 largest.
+const clicks = around !== null
+  ? A.clicks(chs, rate, { keep: Infinity }).filter(c => c.t >= range[0] && c.t <= range[1])
+  : A.clicks(chs, rate);
 const silences = A.silences(loud.momentary);
 const valleys = A.valleys(rms200);
 const edges = A.edges(chs, rate);
@@ -132,6 +135,7 @@ if (edges.first10msDb > -40) warn(`starts at ${edges.first10msDb} dBFS in the fi
 if (edges.last10msDb > -40) warn(`ends at ${edges.last10msDb} dBFS in the last 10 ms; the tail is cut rather than released`);
 if (silences.length) info(`near-silence (< -60 LUFS momentary): ${silences.map(s => `${s.from}-${s.to}s`).join(', ')}`);
 if (valleys.length) info(`valleys (200 ms RMS >= 10 dB under the surrounding 4 s): ${valleys.map(v => `${v.t}s (-${v.depth})`).join(', ')}`);
+if (around !== null && !clicks.length) info(`no discontinuities in ${range[0].toFixed(2)}-${range[1].toFixed(2)}s`);
 if (clicks.length) info(`discontinuities: ${clicks.map(c => `${c.t.toFixed(3)}s`).join(', ')} -- fine at a designed tick, a bug at a note start or stop`);
 if (markRows.length) {
   console.log('\n  mark     onset      peak       before -> after LUFS   quietest 200 ms nearby');

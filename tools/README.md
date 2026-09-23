@@ -43,7 +43,7 @@ matches arriving there by playback. That is what makes a film inspectable and th
 | `shoot.mjs <html> --times\|--range\|--around t --window w [--sheet]` | Numbered stills and a labelled contact sheet. | Read the sheet around every transition. |
 | `still.mjs <html> --at t --out x.png` | Native canvas PNG, checked for repeatability. | Prints native dimensions. `--size` on screenshot tools scales capture, not art. |
 | `render.mjs <html> [--from a --to b] --fps 30 --size 1080 --engine firefox` | Seeks every frame into ffmpeg (no dropped or duplicated frames); muxes `renderAudio()` on full renders. | Prints muxed loudness and true peak. |
-| `audio.mjs <html> [--twice] [--marks a,b] [--around t --window w] [--ffmpeg]` | Renders the score alone in seconds: WAV, JSON report and sheet (waveform, log spectrogram, BS.1770 loudness, per-mark sync). | No `FAIL` lines; `--twice` proves determinism. |
+| `audio.mjs <html> [--twice] [--marks a,b] [--around t --window w] [--ffmpeg]` | Renders the score alone in seconds: WAV, JSON report and sheet (waveform, log spectrogram, BS.1770 loudness, per-mark sync). | No `FAIL` lines; `--twice` proves determinism; `--around` lists every discontinuity in its window. |
 
 Add `--engine firefox` to check the primary browser. Outputs land in `out/` at the repo root.
 Run `npm test` after changing anything in `tools/lib/`. No tool certifies artistic quality.

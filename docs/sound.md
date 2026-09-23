@@ -112,6 +112,14 @@ Save audible tools (riser, stinger, hush before impact) for the one or two real 
 cut they cancel. An unbridged hard cut is a choice only when one of them marks it. Check summed
 envelopes: a long release that's inaudible before the next attack bridges nothing.
 
+A transition sound in a tonal score comes from the score's own instrument. The kit's `paper`
+grains read as static and ripping under Nonpareil's handpan and were replaced: a handpan
+recording played backwards into the moment the edge crosses mid-frame, then forwards out, in key
+and panned with the edge. Undo the recording's decay (kept to −50 dB, so about 50/length dB per
+second) or the reversed swell arrives only in its last second; soften the strike with a 30 ms
+crossfade at the peak; pick long-ringing recordings for long run-ups
+([Nonpareil](../films/nonpareil/FILM.md) `edgeGesture`).
+
 ## Density, silence, climax
 
 - The ear tracks about two and a half simultaneous layers of one kind; a third reads as mass.
@@ -147,7 +155,8 @@ envelopes: a long release that's inaudible before the next attack bridges nothin
 - Three finished films put 40–75% of energy at 250 Hz–1 kHz and under 6% above 2 kHz (dark);
   nothing above 4 kHz means no air.
 - A click at a note start is a gain jump instead of a ramp; the tool lists discontinuities (one at
-  a designed tick is expected).
+  a designed tick is expected). The full-film list keeps the 12 largest; `--around`
+  lists every one in its window.
 
 ## Judging sound
 
@@ -169,6 +178,11 @@ node audio.mjs ../films/<name>/index.html --engine firefox --ffmpeg
   the muxed loudness and true peak, since AAC can raise true peak. If you can't listen, report the
   measured checks and leave perceptual quality unclaimed. Record direction, sync events, silences
   and what was measured or heard in `FILM.md`.
+- A local revision can change approved audio without touching its notes. Moving Nonpareil's
+  next bass entry re-cut the held note before it (`bowSpan` spreads its hops over the span),
+  leaving a residual only 8 dB down inside the approved section. Check a revision against the
+  previous WAV: fit one gain over the approved span, then measure the residual every few seconds;
+  about −80 dB is identical up to loudness re-normalisation.
 
 ## Studies and gaps
 

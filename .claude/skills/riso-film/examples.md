@@ -60,6 +60,22 @@ shots on window-seat's live plates; camera moves are vector reprojections before
 | Events derived from simulation | `C_RING` | Where the simulated tail first meets the water, so the splash and its pan follow the physics. |
 | Jitter metric | `chainsAt` (`__riso.chains`), `jitter.mjs` | Screen-space chain points for measuring frame-to-frame jumps; nothing draws them. |
 
+## films/nonpareil — one overhead take, 70 s
+
+Paper marbling from above: drops, stones, rake, comb and a pulled flower, then a sheet rolled on,
+peeled back toward the lens like a page and landed face up, mirrored, beside the tray. The
+compositor is window-seat's; the camera stays overhead and reprojects vectors.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Closed-form marbling | `opMap`, `applyOp`, `mapPoly`, `refine`, `stateAt`, `PREFIX` | Drops and tine passes are bijections of the plane (Jaffer & Lu), so every boundary stays a simple closed curve; stretched edges refine through the map; prefix checkpoints keep `seek(t)` pure. |
+| One list for picture and score | `OPS`, `buildOps`, `beat` | Every drop lands on the 96 BPM grid; the picture, ripples, tools and score all read the same ops. |
+| Bending sheet in perspective | `sheetAt`, `drawSheet`, `CURL`, `LOOP`, `PAT` | A curve across the fold drawn as runs of a baked coverage map, one affine map per run; heights scale by `HCAM/(HCAM − Z)`; screening stays in `compose()`. |
+| Page-turn transfer | `peelAt`, `LOOP`, `PX` | A loop rolling without slipping puts the flap at x = 2a + λ − s, so the print is face up and mirrored by construction and lands exactly at `PX − s`. |
+| Shadow of a rising surface | `castShadow` | Laid on the ground before any of the sheet is drawn; laid again only where the flap overhangs the part still lying down. |
+| Lagging follow camera | `camTail`, `follow`, `sheetMid` | The camera tracks the carried sheet's mean x averaged over the last 0.6 s: a late, smooth follow that stays pure in `t`. |
+| Water on a print | `drawRinse`, `frontV`, `wetRim`, `drawPool`, `RIVULETS` | A wavy front with a glossy band, flow streaks and the window reflected where it is wet; rivulets start on beats and are also score notes. |
+
 ## films/lumen — resonance form, 28 s
 
 A centre dot opens eight worlds through irises and sweeps, recollects them through one

@@ -47,4 +47,6 @@ Plate correctness does not fix drawing, perspective or pacing; see `docs/visual-
   one ink into a single pass. Spatial tone on a live element needs `bandPass`, and a bright one
   over a dark ground needs `relight` first; moving frames use live plates (both in `docs/motion.md`).
 - `coverage` is the dot screen, `alpha` is plate opacity. Fade line work on alpha and width:
-  punching a screen through a 5px stroke breaks it into dashes rather than lightening it.
+  punching a screen through a 5px stroke breaks it into dashes rather than lightening it. A knock
+  narrower than the screen pitch (~4.6 px) or under ~0.4 barely prints (Nonpareil's water
+  streaks): count changed pixels against a render without it.

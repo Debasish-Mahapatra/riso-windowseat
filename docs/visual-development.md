@@ -136,6 +136,10 @@ orthographic/graphic treatment; mixing them by accident disconnects parts.
 - Before polishing, play a silent timed rough cut at full duration to test density, anticipation,
   holds and transitions; a contact sheet can't show how long a hold feels. Don't reach a minute
   by stretching a 28-second montage's cues. Leave music out unless scoring was requested.
+- Something that must cover the subject for a while (a sheet laid on a bath, a cloth over a
+  table) covers least as a moving roll or curl. Held up by one edge it spans everything between
+  contact and hands: Nonpareil's sheet printed the frame plain cream for about 2 s; unrolled from
+  a loose curl it covered a third of the bath, moving.
 
 ## Evidence and stopping
 
