@@ -1,0 +1,29 @@
+BigSoundBank.com licence note (written 2026-09-23 while sourcing samples for "One Tulip a Day")
+====================================================================================================
+
+Files used from BigSoundBank (all recorded by Joseph SARDIN; #3315 and #3317 credited to
+"Joseph SARDIN & Axeline T."):
+
+  #1102 Bell Bike #5             https://bigsoundbank.com/bell-bike-5-s1102.html
+  #1042 Bell bike #4             https://bigsoundbank.com/bell-bike-3-s1042.html
+  #3011 Hiss of steam train #3   https://bigsoundbank.com/hiss-of-steam-train-3-s3011.html
+  #3315 Train whistle, foley #1  https://bigsoundbank.com/train-whistle-foley-1-s3315.html
+  #3317 Train whistle, foley #3  https://bigsoundbank.com/train-whistle-foley-3-s3317.html
+
+Each of these download pages shows the line
+  "License CC0 (public domain): Free and royalty-free"
+
+Site licence page, https://bigsoundbank.com/licenses.html (checked 2026-09-23), states:
+  "You are allowed to: Share, copy, distribute and communicate the material by all means and in
+   all formats. Adapt, remix, transform and create from material. Use, including for commercial
+   purposes. Without any restrictions. Without asking permission. This is: Creative Commons CC0 1.0
+   Universal / WTFPL license ... Public Domain Dedication."
+  "All files whose download pages mention "Free and Royalty Free" ... are made available free of
+   charge and freely for all your projects, whether commercial or not, and worldwide."
+Credit is optional; the author suggests: "Additional sounds: Joseph SARDIN - BigSoundBank.com".
+
+The CC0 1.0 legal code is in BigSoundBank_CC0-1.0_legalcode.txt (downloaded from
+https://creativecommons.org/publicdomain/zero/1.0/legalcode.txt).
+
+Downloads came from https://bigsoundbank.com/UPLOAD/bwf-en/<number>.wav. These URLs are not
+version-pinned, so samples.json records the SHA-256 of each file.
