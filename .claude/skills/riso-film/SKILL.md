@@ -32,8 +32,11 @@ equally valid alternative to a montage. Preserve approved direction in revisions
 ## 2. Prove the hard part first
 
 Before filling a timeline, inspect real subject references and build one representative hard
-frame. For complex art, compare small viewpoint/value thumbnails first. Fix generic silhouettes
-and inconsistent perspective before adding grain, hatching or more scenes.
+frame. For complex art, compare small viewpoint/value thumbnails first. When the request remakes
+a known video, measure the file itself (cuts, shots, actions) before choosing what to keep. A real
+person's likeness is measured on a reference grid and checked in a side-by-side debug render
+(`docs/visual-development.md`, people). Fix generic silhouettes and inconsistent perspective
+before adding grain, hatching or more scenes.
 
 Then build a short sample of the hardest action: the subject doing something, not just arriving.
 Check attachments, mass, timing and aftermath. For a long film, make a full-duration silent rough
@@ -57,7 +60,9 @@ from `films/window-seat/index.html` (see `docs/motion.md`).
   for camera moves; never resize a screened bitmap.
 - Share geometry between marks and their knockouts, and one clock between actions coupled
   across shots.
-- Build in small batches; inspect each scene at its real duration and its render cost.
+- Build in small batches; inspect each scene at its real duration and its render cost. Live
+  plates run 100–200 ms/frame; profile per draw function before optimising (`docs/motion.md`,
+  live plates). The generated player buffers slow films, so share MP4s for judging pace.
 - Keep `__riso.shots = [{id,start,end,readAt,action,transition}]` derived from the one
   authoritative timeline; `readAt` is a representative visible moment. No second set of timing
   constants.

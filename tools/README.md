@@ -37,7 +37,7 @@ matches arriving there by playback. That is what makes a film inspectable and th
 
 | Command | Does | Success signal |
 |---|---|---|
-| `new-riso.mjs --kind film\|still --out <path>` | Blank paper with print, craft and motion kits, player and contract; no inherited art. | Refuses to overwrite existing files. |
+| `new-riso.mjs --kind film\|still --out <path>` | Blank paper with print, craft and motion kits, player and contract; no inherited art. The player buffers to a frame cache when a frame draws slower than 1/30 s. | Refuses to overwrite existing files. |
 | `verify.mjs <html> [--times a,b]` | Repeated seeks and cold jumps give identical pixels in both engines, across the real duration and shot boundaries. | Exit 0. Time-seeded noise can still pass; inspect adjacent frames. |
 | `review.mjs <html>` | Shot sheet and JSON timing report from `__riso.shots`, else twelve samples. | Repeated-transition notes call for judgement, not errors. |
 | `shoot.mjs <html> --times\|--range\|--around t --window w [--sheet]` | Numbered stills and a labelled contact sheet. | Read the sheet around every transition. |

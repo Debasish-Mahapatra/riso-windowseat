@@ -21,6 +21,8 @@ broad aesthetic request is permission to art-direct, not a missing brief.
 | Magical, explosive | A transformation rule staged as preparation, release, aftermath. |
 | Original | New viewpoint, action and progression for the subject; new palette or nouns isn't enough. |
 | Like an earlier film | Which to keep: print, rhythm, structure or one effect. Don't silently inherit all four. |
+| A remake of a known video or meme | Measure the actual file: cut times, shot list, what each shot does. Keep its identity (structure, cut rhythm, action) and drop its defects (low resolution, morphing, watermarks) unless asked for. |
+| Devouring, greedy, frantic | Overlapping actions: the next starts before the last consequence finishes, and consequences accumulate (the plate empties, sauce stays on the face). |
 
 Lessons from real requests (the current request always overrides; assistant praise and old
 completion reports are not evidence of satisfaction):
@@ -33,6 +35,10 @@ completion reports are not evidence of satisfaction):
   on its loop: inspect handoffs and loop boundaries, not just attractive frames.
 - Automatic pink/blue collisions and two-dot endings were rejected after several films: reuse the
   craft, not the Resonance story. A concept-specific motion doesn't carry to later films.
+- A meme remake was corrected twice: away from imitating the source's poor quality, then back
+  to its structure (ten 2-second shots, a new room and outfit at each cut) at a devouring pace,
+  with no playing to camera. A recognisable reference has an identity and defects; decide which
+  is which from the file, not from memory of it.
 - Longer films raise the burden on drawing and within-shot action; a short motif can't be
   stretched. "Stills, not animations" means native PNG, with the effort spent on form, pose,
   contact and light.
@@ -81,6 +87,18 @@ joints and attachments; check limb proportions in the chosen view. Hands reach a
 figures meet seat and controls. A generic head-and-limbs stamp repeated at a desk doesn't improve
 when shrunk. If an essential figure fails, study and redraw it or pick a truthful readable
 viewpoint; don't just hide it.
+
+- A real person's likeness comes from measured proportions, not generic features plus texture.
+  Lay a head-unit grid on a frontal reference photo (crown −0.5, chin +0.5), read the landmarks
+  (hairline, brows, eye spacing, nose width and base, mouth, chin, ear span), author features in
+  those units on a surface-wrapped head so a turn foreshortens them together, and compare a
+  debug render beside the photo at the same pose and size. Each pass names a measured
+  difference ("nose too narrow, brows too high"). Study the photo; don't trace or embed it.
+- A hand holding a tool needs two frames: the tool's, pinning the fingertips to the handle, and
+  the hand's, which carries the wrist bend. One shared frame locks the wrist in line with the tool.
+- Arm bones at true length swing the elbow far out when the hand is near the shoulder on screen,
+  because the forearm points at the lens. Shorten the screen bones with reach; a short sleeve on
+  a foreshortened arm is a rounded mass, not a trapezoid.
 
 Objects: attach every detail to a host surface. Equal keys on a sloping keyboard foreshorten;
 circles on a turned panel become ellipses. Use coherent perspective or a coherent

@@ -67,24 +67,59 @@ function render(t) {
 function paintBaked(id) {
   ctx.save();ctx.globalCompositeOperation='multiply';ctx.drawImage(bakeScene(id,OUT),0,0);ctx.restore();
 }
-let at=0,playing=false,epoch=0,recorder=null,recordURL=null;
-function pause(){if(playing)at=clamp((performance.now()-epoch)/1000,0,DUR);playing=false;document.getElementById('play').textContent='Play';if(recorder?.state==='recording')recorder.stop();}
-function play(){if(at>=DUR)at=0;epoch=performance.now()-at*1000;playing=true;document.getElementById('play').textContent='Pause';}
+/* A frame slower than the frame interval cannot play live (live-plate films take
+   100-200 ms): Play then renders every frame once into a WebP cache, shown as
+   "Buffering n%", and plays from it at FPS; replays are immediate. Fast films play
+   live. seek() and window.__riso stay live and pure; tools never touch the cache. */
+const FPS=30,NF=Math.round(DUR*FPS),cache=[],bitmaps=new Map(),playBtn=document.getElementById('play');
+let at=0,playing=false,epoch=0,recorder=null,recordURL=null,slow=null,buffering=false,filled=0;
+function label(){playBtn.textContent=playing?'Pause':buffering?'Buffering '+Math.round(filled/(NF+1)*100)+'%':'Play';}
+function start(){if(at>=DUR)at=0;epoch=performance.now()-at*1000;playing=true;label();}
+function pause(){if(playing)at=clamp((performance.now()-epoch)/1000,0,DUR);playing=false;buffering=false;label();if(recorder?.state==='recording')recorder.stop();}
+async function buffer(){
+  buffering=true;label();const resume=at;
+  for(let i=0;i<=NF&&buffering;i++){
+    if(cache[i])continue;
+    render(i/FPS);canvas.toBlob(b=>{cache[i]=b;filled++;},'image/webp',0.8);   // snapshots now, encodes alongside the next draw
+    label();await new Promise(r=>setTimeout(r,0));
+  }
+  while(buffering&&filled<NF+1)await new Promise(r=>setTimeout(r,50));
+  if(buffering){buffering=false;at=resume;start();}
+}
+function play(){
+  if(at>=DUR)at=0;
+  if(slow===null){const t0=performance.now();render(at);render(at);slow=(performance.now()-t0)/2>900/FPS;}
+  if(!slow||filled>=NF+1)start();else buffer();
+}
 function seek(t){pause();at=clamp(t,0,DUR);render(at);}
-document.getElementById('play').onclick=()=>playing?pause():play();
+playBtn.onclick=()=>playing||buffering?pause():play();
 document.getElementById('replay').onclick=()=>{seek(0);play();};
 scrub.oninput=()=>seek(Number(scrub.value));
-addEventListener('keydown',e=>{if(e.target.matches('input'))return;if(['Space','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();if(e.code==='Space')playing?pause():play();if(e.code==='ArrowLeft')seek(at-1/30);if(e.code==='ArrowRight')seek(at+1/30);});
+addEventListener('keydown',e=>{if(e.target.matches('input'))return;if(['Space','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();if(e.code==='Space')playing||buffering?pause():play();if(e.code==='ArrowLeft')seek(at-1/FPS);if(e.code==='ArrowRight')seek(at+1/FPS);});
 document.getElementById('record').onclick=()=>{
   if(recorder?.state==='recording'){pause();return;}
   const mime=['video/webm;codecs=vp8','video/webm;codecs=vp9','video/webm'].find(m=>MediaRecorder.isTypeSupported(m));
   if(!mime)throw Error('No supported recording codec; use tools/render.mjs');
-  seek(0);const stream=canvas.captureStream(30),chunks=[];recorder=new MediaRecorder(stream,{mimeType:mime});
+  seek(0);const stream=canvas.captureStream(FPS),chunks=[];recorder=new MediaRecorder(stream,{mimeType:mime});
   recorder.ondataavailable=e=>{if(e.data.size)chunks.push(e.data);};
   recorder.onstop=()=>{stream.getTracks().forEach(t=>t.stop());if(recordURL)URL.revokeObjectURL(recordURL);recordURL=URL.createObjectURL(new Blob(chunks,{type:mime}));const a=document.getElementById('download');a.href=recordURL;a.download='preview.webm';a.style.display='inline';};
   recorder.start();play();
 };
-function tick(now){if(playing){at=clamp((now-epoch)/1000,0,DUR);render(at);if(at>=DUR)pause();}requestAnimationFrame(tick);}
+function tick(now){
+  if(playing){
+    at=clamp((now-epoch)/1000,0,DUR);
+    if(!slow)render(at);
+    else{
+      const i=Math.min(NF,Math.floor(at*FPS));
+      for(let j=i;j<Math.min(NF+1,i+8);j++)if(cache[j]&&!bitmaps.has(j)){bitmaps.set(j,null);createImageBitmap(cache[j]).then(b=>bitmaps.set(j,b));}
+      for(const [j,b] of bitmaps)if(j<i-1){if(b)b.close();bitmaps.delete(j);}
+      const b=bitmaps.get(i);
+      if(b){ctx.setTransform(1,0,0,1,0,0);ctx.globalAlpha=1;ctx.globalCompositeOperation='source-over';ctx.drawImage(b,0,0);scrub.value=at;clockLabel.value=at.toFixed(2);}
+    }
+    if(at>=DUR)pause();
+  }
+  requestAnimationFrame(tick);
+}
 window.__riso={duration:DUR,ready:false,seek,shots:SHOTS};
 for(const id of Object.keys(SCENES))bakeScene(id,OUT);
 seek(Number(new URLSearchParams(location.search).get('t'))||0);

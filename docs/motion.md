@@ -38,6 +38,14 @@ kit; copy both. It depends on `clamp`, `lerp`, `cv`, `W`, `TAU`, `INK`, `REG`, `
 - A modulo reset or missing outgoing cue is repeatable, passes `verify.mjs`, and still jumps in
   playback. Inspect neighbouring times, not just repeated seeks.
 
+Seek-history traps that `verify.mjs` caught:
+
+- Per-frame derived state (a mound height, a camera) must be computed at the top of the frame.
+  A global set part-way through lets an earlier reader use the previous frame's value.
+- In Chromium, `filter: blur()` on a GPU canvas, and `drawImage` between GPU and CPU canvases, were
+  not bit-exact across runs. Give scratch canvases `willReadFrequently` and cache with
+  `getImageData`/`putImageData`.
+
 ## Easing is a claim about mass
 
 Study 9. Left: one curve for everything, so stone and leaf fall together and stop dead, like a
@@ -163,6 +171,18 @@ swim. Four plates cost ~110 ms/frame at 1080 in Firefox: export is fine, playbac
   4.6 px pitch, drops under ~8 px radius read as dirt.
 - Fireworks: each spark analytic from burst age with drag and gravity, into a mask that knocks out
   the night before inking. Star trails are arcs of length ω·(t − t0).
+
+Cost. A character film on five live plates ran 90–200 ms/frame in Firefox, of which screening was
+only ~16 ms. Unbuffered in-page playback at that cost was reported as "choppy" before the art was
+judged; the generated player now buffers slow films (tools/new-riso.mjs). Before optimising,
+wrap the named draw functions and time a few sequential seeks per shot. What paid off:
+
+- `ctx.filter = 'blur()'` processes the whole canvas. Blur each soft shape once into a scratch
+  canvas limited to its padded bounding box, then stamp that mask on every plate at its coverage.
+- Many similar strokes (strands, hairs): batch back-to-front groups into one path per pass;
+  weaving survives between groups and a hundred strands cost a few dozen fills.
+- A shot's static backdrop: draw it once, keep `getImageData` copies of the plates and
+  `putImageData` them back on later frames of that shot. The copy is exact, so seeks stay pure.
 
 ## Judging motion
 
