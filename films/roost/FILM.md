@@ -1,7 +1,8 @@
 # Roost
 
 70 seconds, 1080 × 1080, 30 fps, with a chamber string score. Authoritative source: `index.html`.
-Delivery: a Firefox render (`render.mjs`) to `out/roost.mp4`; score `out/roost.wav` (48 kHz stereo).
+Delivery: the MP4 is attached to [the v1.0 release](https://github.com/sevenevesai/riso-windowseat/releases/tag/v1.0).
+It is a Firefox render (`render.mjs`, which also writes `out/roost.wav`, 48 kHz stereo).
 The scored Firefox export decodes to 2100 frames, 70.00 s, 1080² H.264 High, with AAC stereo
 at 192 kb/s. Sample credits are retained in MP4 and WAV metadata.
 
