@@ -36,9 +36,13 @@ moment on that time by starting `attack` earlier.
   (a 29 s score once met a 28 s film) and a shorter one leaves a silent ending.
 - Set loudness by one static gain after render; `DynamicsCompressor` differs across engines and
   hides the balance the mix should already have.
-- `ConvolverNode.normalize` off; scale the impulse yourself. Exponential ramps can't reach 0 (the
-  kit floors at `1e-4`). `setValueCurveAtTime` owns its parameter for its span. Stop sources after
-  release, never with gain open. Cache the render so `renderAudio()` and the player share it.
+- `ConvolverNode.normalize` off; scale the impulse yourself. The kit's `impulse` in
+  `studies/sound.html` still divides energy by the sample rate, so its wet signal is about 77×
+  hot: it masked Window Seat's attacks (fixed there) and forced Held down to wet .035. Copy
+  Window Seat's `impulse`.
+- Exponential ramps can't reach 0 (the kit floors at `1e-4`). `setValueCurveAtTime` owns its
+  parameter for its span. Stop sources after release, never with gain open. Cache the render so
+  `renderAudio()` and the player share it.
 
 ## Sound follows a visible event
 

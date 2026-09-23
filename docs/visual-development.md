@@ -94,11 +94,29 @@ viewpoint; don't just hide it.
   those units on a surface-wrapped head so a turn foreshortens them together, and compare a
   debug render beside the photo at the same pose and size. Each pass names a measured
   difference ("nose too narrow, brows too high"). Study the photo; don't trace or embed it.
-- A hand holding a tool needs two frames: the tool's, pinning the fingertips to the handle, and
-  the hand's, which carries the wrist bend. One shared frame locks the wrist in line with the tool.
-- Arm bones at true length swing the elbow far out when the hand is near the shoulder on screen,
-  because the forearm points at the lens. Shorten the screen bones with reach; a short sleeve on
-  a foreshortened arm is a rounded mass, not a trapezoid.
+  Proportions alone read as a mask. Add form as a relief heightfield (brow shelf, sockets,
+  cheekbones, nose, muzzle, chin) lit from the mesh (lambert wrapped past the terminator, a cast
+  shadow marched toward the light, concavity) rather than painted plane blobs; keep the relief
+  smooth at the midline or gloss prints a seam down the forehead. Build the silhouette from
+  front-facing quads so a turned contour breaks at nose and lips, and compare at the film's
+  actual yaws and pitches against ¾ and down-angle photos, not only the frontal one.
+- Hands are posable 3D joint chains, one pose per grip, never one 2D stamp: a fork grip reused
+  for pinching and holding read wrong everywhere. Size them at about 0.8 head heights. Solve each
+  grip so contacts meet, anchor on the contact point, and depth-sort phalanges with the held
+  object. Compare one large hand beside photographs of the same grip before placing it in shots.
+  Capsule fingers read as sausages: joints wider than shafts, a palmar pad, nails on the distal
+  half; curled fingers separate only with a knuckle, a crease and a small cast shadow per bend.
+- A grip is held by working fingers: blend toward an in-grip extreme over time (the pinch parts
+  to take and release, the fist squeezes and the held thing deforms). To wrap a hand round an
+  object, anchor on a point inside the curl and turn the hand so that line lies along the object.
+  A debug-sheet match does not guarantee the shot: sweep roll and pitch in the shot itself (3×3
+  at 1:1), and tint an unidentifiable part flat ink while choosing.
+- Solve arms in 3D with true bones (upper arm 1.5, forearm 1.15 head heights, about 0.2 wide at
+  the biceps). A hand at the face sits under a head-height in front of the shoulder; pushing the
+  wrist further out aims the upper arm at the lens and balloons the sleeve. The shoulder joint sits
+  a deltoid's radius below the shoulder line, or sleeves read as pads.
+- A close-up needs the close camera's strong perspective; the medium shot's weak perspective
+  flattens a face.
 
 Objects: attach every detail to a host surface. Equal keys on a sloping keyboard foreshorten;
 circles on a turned panel become ellipses. Use coherent perspective or a coherent

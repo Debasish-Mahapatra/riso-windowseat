@@ -53,6 +53,18 @@ tempo, cues and pan are measured from the projected flock.
 | Marks | `SCORE_MARKS` | Five cues from `FLIGHT_SCORE.cue`, exposed as `__riso.marks`. |
 | Attribution in exports | `AUDIO_CREDIT`, `wavBase64` | Same WAV `LIST/INFO` credit as window-seat. |
 
+## films/held — found CC0 instruments, 70 s
+
+Mbira, glockenspiel, hand chimes, harp, cello, violin pizzicato and flute from VCSL and
+VSCO-2-CE, in B pentatonic, with kit synthesis only for weather and contact.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Embedded FLAC samples | `SAMPLES`, `loadSamples` | 16-bit mono 32 kHz FLAC, lossless, so both browsers decode the same samples. Rebuilt by `build-samples.py`; sources in `AUDIO-SOURCES.md`. |
+| Sampler voices | `samp`, `bowed` | Nearest root repitched by rate; `bowed` crossfades retriggers past the bow attack for notes longer than a sample. |
+| Cues from picture constants | `buildScore` (`spins`), `K_SNAP`, `L_SNAG`, `C_TAUT`, `E_LAMP` | Every cue reads the picture's event constants; tumble runs sit on the keyed spin times. |
+| Dry room for recorded samples | `room.wet` in `buildScore`, `samp` (`send * .4`) | Samples carry their own rooms. With the kit's reverb at wet .3, stereo correlation fell to 0.02; at .035 it is 0.72. |
+
 ## films/lumen — procedural score, 28 s
 
 A self-contained score that does not use the shared kit: its voices are nested inside

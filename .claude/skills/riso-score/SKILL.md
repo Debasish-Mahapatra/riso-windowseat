@@ -8,9 +8,9 @@ description: Scores a riso film or reworks its score. Designs the cue list from 
 Produce the `renderAudio()` half of `films/<name>/index.html`: a deterministic stereo score exactly
 the film's duration at 48 kHz, scaled once to −16 LUFS under a −1 dBTP ceiling, with a measured
 sheet and a full muxed MP4 reviewed with the picture. Commands run in `tools/`.
-[examples.md](examples.md) shows four finished scores: sampled piano (`films/window-seat`),
-recorded strings timed from the picture (`films/roost`), procedural (`films/lumen`) and two
-switchable candidates (`films/emergence`).
+[examples.md](examples.md) shows five finished scores: sampled piano (`films/window-seat`),
+recorded strings timed from the picture (`films/roost`), found CC0 instruments (`films/held`),
+procedural (`films/lumen`) and two switchable candidates (`films/emergence`).
 
 ## Before writing a note
 

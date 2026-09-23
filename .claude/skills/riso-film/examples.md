@@ -47,6 +47,19 @@ into printed dark bands. Its compositor is window-seat's, copied.
 | Stable glitter | `GLIT`, `drawWater` | Glints grow and shrink over about 2 s at full ink on a page-fixed column; see `FILM.md` for the flashing version this replaced. |
 | Seeded reedbed | `REEDS`, `drawReeds`, `PLUMEC` | 210 stems with ribbon leaves; plumes on their own lighter plate mask; per-stem sway plus a shared gust. |
 
+## films/held — cut narrative with physical rope, 70 s
+
+A kite's line parts, it tumbles across a town, is snagged by a vane and caught by a sloop. Five
+shots on window-seat's live plates; camera moves are vector reprojections before screening.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Rope and tail physics | `simChain`, `breeze`, `drawTail` | Verlet chain integrated once at load on a 1/240 s step, recorded at 60 Hz and interpolated, so `seek(t)` stays pure. Head node rides the attachment; bows orient from nodes ±2. |
+| Line running through a snag | `gripAt`, `C_GRIP` | Pulls the rope point at arc length s onto a moving point, so line slides through a vane or up a forestay instead of pinning. |
+| Velocity-matched handoff | `hk`, `C_KEYS`, `C_HAND`, `catchKite` | Hermite keys with explicit velocities; after the catch the kite is keyed relative to the masthead from its current position and velocity. |
+| Events derived from simulation | `C_RING` | Where the simulated tail first meets the water, so the splash and its pan follow the physics. |
+| Jitter metric | `chainsAt` (`__riso.chains`), `jitter.mjs` | Screen-space chain points for measuring frame-to-frame jumps; nothing draws them. |
+
 ## films/lumen — resonance form, 28 s
 
 A centre dot opens eight worlds through irises and sweeps, recollects them through one
