@@ -1,15 +1,29 @@
-# Window Seat
+# riso-windowseat
 
-A 78-second risograph film of a night train journey, seen through one fixed window with a glass
-of water on the sill. Every pixel and every sound except the piano is procedural, and the whole
-film is a single `index.html` of Canvas 2D and Web Audio: no libraries, fonts, images or network
-calls.
+Procedural risograph films and prints, each a single `index.html` of Canvas 2D and Web Audio:
+no libraries, fonts, images or network calls. The repo began as the release of **Window Seat**.
+Making it, and the two shorts before it, produced a reusable kit of Claude Code skills, craft
+docs and a render harness. Roost was made with it next.
 
 ![Window Seat, dawn from the viaduct](films/window-seat/poster.png)
 
-**Watch:** download `window-seat.mp4` (1080 × 1080, 30 fps, 78 s, stereo) from the
-[v1.0 release](https://github.com/sevenevesai/riso-windowseat/releases/tag/v1.0), or open
-[`films/window-seat/index.html`](films/window-seat/index.html) in a browser and press play.
+## Films
+
+All are 1080 × 1080, 30 fps. MP4s are on the
+[v1.0 release](https://github.com/sevenevesai/riso-windowseat/releases/tag/v1.0). To watch the
+source instead, open any `index.html` in a browser and press play.
+
+| Film | Length | |
+|---|---|---|
+| [Window Seat](films/window-seat/) | 78 s | A night train journey through one window, scored for piano |
+| [Roost](films/roost/) | 70 s | One take of a starling murmuration from sunset to roost, scored for strings |
+| [Lumen](films/lumen/) | 28 s | A seed that contains a sun; the first short, in call-and-response form |
+| [Emergence](films/emergence/) | 28 s | Lumen's sibling: how machines learned to listen, as nine worlds |
+
+### Window Seat
+
+A night train journey seen through one fixed window with a glass of water on the sill. Every
+pixel and every sound except the piano is procedural.
 
 | Time | Passage |
 |---|---|
@@ -19,23 +33,28 @@ calls.
 | 57–78 s | Dawn from a viaduct, rain streaming back along the glass, a lakeside halt under a rainbow |
 
 The score, "A Light Left in the Window", is an original piano piece in 6/8 whose phrasing follows
-the picture's own timeline. The glass of water leans with every acceleration and is the last
-thing to settle.
+the picture's timeline. The glass of water leans with every acceleration and is the last thing to
+settle.
 
-## How it was made
+![Contact sheet of Window Seat's shots](films/window-seat/sheet.jpg)
 
-I directed it; Claude Code (Anthropic's coding agent) wrote the code, working inside this repo
-with the skills, rules and craft docs you see here. Each passage was designed in
-[`FILM.md`](films/window-seat/FILM.md), proved on its hardest frame first, then inspected as
-frame strips, 1:1 crops and loudness sheets rendered by the harness in `tools/`. Every frame is a
-pure function of time (`seek(t)`), so any moment can be inspected exactly and the MP4 cannot drop
-frames. `FILM.md` records the design decisions, measurements and remaining weaknesses honestly.
+### Roost
 
-![Contact sheet of the film's shots](films/window-seat/sheet.jpg)
+A murmuration over a marsh in one fixed view. Each starling is a 2–3 px ink dot, so the flock
+is the halftone: where the sheet turns edge-on, the birds pile into dark printed ribbons. A
+falcon stoops through it and the flock pours into the reeds at nightfall. The string score is
+timed from the picture.
 
-## Make your own with Claude
+## How they're made
 
-The repo is set up so a Claude Code session can pick it up and work at the same standard.
+I directed each film; Claude Code (Anthropic's coding agent) wrote the code, using the skills,
+rules and docs in this repo. A work is designed in its `FILM.md`, its hardest frame is proved
+first, and then it is inspected as frame strips, 1:1 crops and loudness sheets rendered by
+`tools/`. Every frame is a pure function of time (`seek(t)`), so any moment can be inspected
+exactly and the MP4 cannot drop frames. Each `FILM.md` records the design decisions and
+measurements, and lists the film's remaining weaknesses.
+
+## Make your own
 
 ```
 git clone https://github.com/sevenevesai/riso-windowseat
@@ -51,18 +70,16 @@ Then open Claude Code in the repo root and ask, for example:
 - "Extend Window Seat with a snowy mountain pass after the lake."
 
 `CLAUDE.md` gives the session the contract and commands. The `riso-film`, `riso-still` and
-`riso-score` skills in `.claude/skills/` carry the workflow and gates, and each skill's
-`examples.md` points at the exact routines in the shipped films worth reusing. A hook warns when
-an edit breaks determinism.
+`riso-score` skills in `.claude/skills/` carry the workflow and gates. Each skill's `examples.md`
+points to the routines in the shipped films that are worth reusing. A hook warns when an edit
+breaks determinism.
 
 ## What's inside
 
 | Path | Contents |
 |---|---|
-| `films/window-seat/` | The film, its design record, sample credits and the piano-bank rebuild script |
-| `films/roost/` | A 70 s one-take starling murmuration at dusk, scored for recorded strings |
-| `films/lumen/`, `films/emergence/` | Two 28 s scored films in a call-and-response form, as further examples |
-| `prints/workings/` | A still print series; the print kit that new works start from |
+| `films/` | The four films, each with its `FILM.md`; Window Seat and Roost include sample credits and bank rebuild scripts |
+| `prints/workings/` | A still print series and the print kit new works start from |
 | `docs/` | The craft: brief, visual development, drawing, scene space, motion, sound, quality bar |
 | `studies/` | Interactive A/B studies of each technique, and the sound kit |
 | `tools/` | Scaffolding, verification, contact sheets, audio analysis and MP4 export ([README](tools/README.md)) |
