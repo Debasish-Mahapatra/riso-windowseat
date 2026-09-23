@@ -26,8 +26,8 @@ Plan actions and consequences, not illustrated nouns. Per substantial shot: came
 what changes, a readable arrival/hold, and where the eye goes at the next cut. Keep subject
 motion, camera motion, transition and atmosphere distinct. `docs/forms/resonance.md` is an
 optional call-and-response form (used by `films/lumen` and `films/emergence`); use it only when
-asked or deliberately chosen. A single journey through one fixed frame (`films/window-seat`) is an
-equally valid alternative to a montage. Preserve approved direction in revisions.
+asked or deliberately chosen. A single journey through one fixed frame (`films/window-seat`) or
+one continuous take of one event (`films/roost`) is an equally valid alternative to a montage. Preserve approved direction in revisions.
 
 ## 2. Prove the hard part first
 

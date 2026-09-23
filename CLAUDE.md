@@ -2,8 +2,8 @@
 
 Procedural risograph films and still art. Each work is one self-contained `index.html` that draws
 every pixel in Canvas 2D: no libraries, fonts, images or network calls in the deliverable
-(the one exception, `films/window-seat`'s embedded piano recordings, is attributed data inside the
-file). External references may be viewed for research, never embedded.
+(the exceptions, embedded instrument recordings in `films/window-seat` and `films/roost`, are
+attributed data inside the file). External references may be viewed for research, never embedded.
 
 Skills: `riso-film` for animation, `riso-still` for images, `riso-score` for sound. Before
 drawing, read `.claude/rules/riso-plates.md` and `docs/visual-development.md`. Technical checks
@@ -51,6 +51,7 @@ exports mux `renderAudio()`. Firefox is the primary engine. `out/` is disposable
 | Path | Holds |
 |---|---|
 | `films/window-seat/` | Showcase film: source, `FILM.md`, sample credits, piano-bank rebuild. |
+| `films/roost/` | One-take murmuration: analytic crowd, reflections, strings timed from picture. |
 | `films/lumen/`, `films/emergence/`, `prints/workings/` | Finished examples; workings donates the print kit. |
 | `docs/` | Brief, visual development, drawing, scene space, motion, sound, quality bar. |
 | `studies/` | Craft, composition, scene-space and sound kits with A/B studies. |

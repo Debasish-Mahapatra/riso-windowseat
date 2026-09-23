@@ -171,6 +171,11 @@ swim. Four plates cost ~110 ms/frame at 1080 in Firefox: export is fine, playbac
   4.6 px pitch, drops under ~8 px radius read as dirt.
 - Fireworks: each spark analytic from burst age with drag and gravity, into a mask that knocks out
   the night before inking. Star trails are arcs of length ω·(t − t0).
+- Sun glitter on water ([Roost](../films/roost/FILM.md)): glints switching on and off at
+  5.3 rad/s were reported as flashing, and printed over the reflected flock. Keep glints at full
+  ink and grow or shrink them over about 2 s; fading 1 px dashes by coverage drops them below the
+  screen. Mirror the subject into its own mask with the water's ripple and cut that from the glint
+  mask.
 
 Cost. A character film on five live plates ran 90–200 ms/frame in Firefox, of which screening was
 only ~16 ms. Unbuffered in-page playback at that cost was reported as "choppy" before the art was
@@ -201,6 +206,9 @@ node shoot.mjs ../films/<name>/index.html --range 6.6:6.9:0.0333333333 --sheet -
 - `shoot.mjs` rounds filenames to milliseconds; save sub-millisecond pairs separately.
 - A cropped pixel diff locates a reset; compare it with neighbouring motion rather than demanding
   identical frames. Check the same moment in the encoded MP4.
+- Flicker is measured, not eyeballed: count the pixels that change between adjacent frames inside
+  the region (Roost's glitter: 5.4% → 0.1%). A before/after crop that looks identical may simply
+  miss the effect.
 - Is a part really still? Diff two frames and print the bounding box: an apparently moving half
   was the other half's branch crossing the midline.
 - Is a seam real? Sample the column: a bright horizon band was ordinary halftone alternating

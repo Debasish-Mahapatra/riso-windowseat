@@ -8,8 +8,9 @@ description: Scores a riso film or reworks its score. Designs the cue list from 
 Produce the `renderAudio()` half of `films/<name>/index.html`: a deterministic stereo score exactly
 the film's duration at 48 kHz, scaled once to −16 LUFS under a −1 dBTP ceiling, with a measured
 sheet and a full muxed MP4 reviewed with the picture. Commands run in `tools/`.
-[examples.md](examples.md) shows three finished scores: sampled piano (`films/window-seat`),
-procedural (`films/lumen`) and two switchable candidates (`films/emergence`).
+[examples.md](examples.md) shows four finished scores: sampled piano (`films/window-seat`),
+recorded strings timed from the picture (`films/roost`), procedural (`films/lumen`) and two
+switchable candidates (`films/emergence`).
 
 ## Before writing a note
 
@@ -79,7 +80,9 @@ Record under `## Score` in `FILM.md`: direction, tempo/grid and mode, each sync 
 sounds on it, deliberate silences, the measured line (`I −16.0 LUFS, LRA 3.7 LU, TP −2.0 dBTP,
 clipped 0, firefox byte-identical`), the marks table, and what was heard or that nothing was.
 Recorded samples need a license that permits redistribution, pinned sources and attribution
-beside the film (see `films/window-seat/AUDIO-SOURCES.md`).
+beside the film (see `films/window-seat/AUDIO-SOURCES.md`, CC BY, and
+`films/roost/AUDIO-SOURCES.md`, CC0). Libraries disagree on octave numbering (VSCO 2's cello and
+bass name middle C C3, its violin C4), so check each root against the recorded partials.
 
 ## Player audio and rework
 

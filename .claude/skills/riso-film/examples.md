@@ -30,6 +30,23 @@ Its own plate compositor lets live elements be drawn per frame without baked sce
 | Sloshing glass | `SLOSH`, `slosh`, `glass` | A damped oscillator driven by `accel(t)` is integrated once at load into a table; `slosh(t)` interpolates it, so physics stays pure in `t`. |
 | Level crossing | `crossing`, `X_LC` | A world event placed at a distance (`S(26.4)`), not a time. |
 
+## films/roost — one continuous take, 70 s
+
+A starling murmuration from sunset to nightfall in one fixed view. Eleven thousand birds are
+the halftone: each is a solid 2–3 px indigo dot, and where the sheet turns edge-on they pile
+into printed dark bands. Its compositor is window-seat's, copied.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Analytic crowd | `flockState`, `birdPos`, `BU`/`BV`/`BW`, `flockC` | Each bird owns a slot on a thin 3-D sheet that twists, bends and yaws by sums of slow sines; no simulation, so any `t` is exact and thousands of agents stay pure. |
+| Crowd as tone | `drawFlock`, `birdGlyph` | Distant birds are dots whose density makes the value; only close birds get flapping glyphs. |
+| Predator through a crowd | `falconWorld`, `TS`, `PS` | Birds are pushed from the falcon's current and two lagged positions, so the hollow trails it; the strike adds a travelling twist pulse. |
+| Tilt as a horizon shift | `lookUp`, `horizon` | The only camera move is the horizon; every layer hangs off `horizon(t)`. |
+| Draining into a point | `TR`, `XR`/`ZR` | Per-bird roost times are ordered along the sheet, so the flock pours in from one end rather than fading. |
+| Reflections without glitter over them | `drawWater`, `GLIT`, `BK`, `BR` | Birds drawn to `BK` are mirrored into `BR` with the water's ripple, then cut from the glint mask so glints never print over reflected birds. |
+| Stable glitter | `GLIT`, `drawWater` | Glints grow and shrink over about 2 s at full ink on a page-fixed column; see `FILM.md` for the flashing version this replaced. |
+| Seeded reedbed | `REEDS`, `drawReeds`, `PLUMEC` | 210 stems with ribbon leaves; plumes on their own lighter plate mask; per-stem sway plus a shared gust. |
+
 ## films/lumen — resonance form, 28 s
 
 A centre dot opens eight worlds through irises and sweeps, recollects them through one

@@ -60,6 +60,7 @@ an edit breaks determinism.
 | Path | Contents |
 |---|---|
 | `films/window-seat/` | The film, its design record, sample credits and the piano-bank rebuild script |
+| `films/roost/` | A 70 s one-take starling murmuration at dusk, scored for recorded strings |
 | `films/lumen/`, `films/emergence/` | Two 28 s scored films in a call-and-response form, as further examples |
 | `prints/workings/` | A still print series; the print kit that new works start from |
 | `docs/` | The craft: brief, visual development, drawing, scene space, motion, sound, quality bar |
@@ -71,4 +72,6 @@ an edit breaks determinism.
 
 MIT, see [LICENSE](LICENSE). The piano recordings embedded in Window Seat are Salamander Grand
 Piano V3 by Alexander Holm under CC BY 3.0; see
-[`AUDIO-SOURCES.md`](films/window-seat/AUDIO-SOURCES.md).
+[`AUDIO-SOURCES.md`](films/window-seat/AUDIO-SOURCES.md). The string recordings embedded in
+Roost are VSCO 2 Community Edition by Versilian Studios under CC0 1.0; see
+[`AUDIO-SOURCES.md`](films/roost/AUDIO-SOURCES.md).

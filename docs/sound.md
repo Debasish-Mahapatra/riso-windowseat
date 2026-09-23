@@ -56,7 +56,12 @@ peak.
 - The cue start isn't always the accent: a sweep starts off-screen; a bloom's accent is peak
   expansion, which Lumen derives from projected area, not petal start. Lumen's act accents land
   125–225 ms after their marks, soft by design; check any accent the eye reads as a hit.
-
+- Bowed or swelled cues have no onset to detect. Roost's detector found none at four of five
+  marks; energy peaks sat −280 to +300 ms from them. That is not a passed 40 ms test: record the
+  offsets and judge those cues with the picture.
+- When the event is diffuse (a flock arriving, leaving frame), measure it from the picture's
+  projection rather than choosing a time: Roost's `FLIGHT_SCORE` takes arrival and return from
+  the visible fraction of projected birds and tempo from their density and speed.
 ## Material is the timbre
 
 A struck sound is exciter → resonator → body. Exciter speed is hardness: 0.5 ms of noise is a
