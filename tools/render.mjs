@@ -27,11 +27,11 @@ const out = path.resolve(a.out || path.join('..', 'out', `${filmName}.mp4`));
 fs.mkdirSync(path.dirname(out), { recursive: true });
 
 const browser = await launch(engine);
-const { page, duration, errors } = await openFilm(browser, film, { size, css: Number(a.css || 720) });
+const { page, duration, errors, frame } = await openFilm(browser, film, { size, css: Number(a.css || 720) });
 const from = Number(a.from || 0);
 const to = Math.min(Number(a.to || duration), duration);
 const total = Math.round((to - from) * fps);
-console.log(`${filmName}: ${from}-${to}s @ ${fps}fps = ${total} frames, ${size}x${size} (${engine})`);
+console.log(`${filmName}: ${from}-${to}s @ ${fps}fps = ${total} frames, ${frame.width}x${frame.height} (${engine})`);
 
 let wav = null;
 if (!a['no-audio'] && from === 0 && to === duration) {

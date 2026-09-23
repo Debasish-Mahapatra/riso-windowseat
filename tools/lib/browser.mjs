@@ -44,8 +44,19 @@ export async function openFilm(browser, filmPath, { size = 1080, css = 720, quer
     throw new Error(`film never reported window.__riso.ready within ${timeout}ms${hint}`);
   });
 
+  // A non-square film (e.g. 1920×1080 on a 1280×720 CSS canvas) keeps the same
+  // device-pixel ratio; only the viewport changes, so screenshots stay 1:1 with
+  // the backing store.
+  const box = await page.evaluate(() => {
+    const c = document.querySelector('canvas'), r = c.getBoundingClientRect();
+    return { w: Math.round(r.width), h: Math.round(r.height), x: r.left, y: r.top, bw: c.width, bh: c.height };
+  });
+  if (box.w !== css || box.h !== css) {
+    if (box.x !== 0 || box.y !== 0) throw new Error('the film canvas must sit at the top-left of the page');
+    await page.setViewportSize({ width: box.w, height: box.h });
+  }
   const duration = await page.evaluate(() => window.__riso.duration);
-  return { page, duration, errors };
+  return { page, duration, errors, frame: { width: box.bw, height: box.bh } };
 }
 
 /** Render one exact frame and return its PNG buffer. */

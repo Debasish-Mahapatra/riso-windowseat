@@ -24,7 +24,7 @@ const outDir = path.resolve(a.out || path.join('..', 'out', path.basename(path.d
 fs.mkdirSync(outDir, { recursive: true });
 
 const browser = await launch(engine);
-const { page, duration, errors } = await openFilm(browser, film, { size, css: Number(a.css || 720), query: a.query || '' });
+const { page, duration, errors, frame } = await openFilm(browser, film, { size, css: Number(a.css || 720), query: a.query || '' });
 
 let times;
 if (a.around !== undefined) {
@@ -46,18 +46,19 @@ for (const t of times) {
 if (a.sheet && shots.length) {
   const cols = Number(a.cols || Math.min(8, Math.ceil(Math.sqrt(shots.length))));
   const cell = Number(a.cell || 220);
+  const cellH = Math.round(cell * frame.height / frame.width);   // keep the film's aspect
   const rows = Math.ceil(shots.length / cols);
   const html = `<!doctype html><meta charset=utf-8><style>
     body{margin:0;background:#1b1b1b;font:11px ui-monospace,monospace;color:#bbb}
     .g{display:grid;grid-template-columns:repeat(${cols},${cell}px);gap:6px;padding:6px}
-    figure{margin:0}img{width:${cell}px;height:${cell}px;display:block;background:#000}
+    figure{margin:0}img{width:${cell}px;height:${cellH}px;display:block;background:#000}
     figcaption{text-align:center;padding:2px 0}</style>
     <div class=g>${shots.map(s =>
       `<figure><img src="${s.name}"><figcaption>${s.t.toFixed(2)}s</figcaption></figure>`).join('')}</div>`;
   const sheetHtml = path.join(outDir, '_sheet.html');
   fs.writeFileSync(sheetHtml, html);
   const sp = await browser.newPage({
-    viewport: { width: cols * (cell + 6) + 6, height: rows * (cell + 22) + 6 },
+    viewport: { width: cols * (cell + 6) + 6, height: rows * (cellH + 22) + 6 },
   });
   await sp.goto(pathToFileURL(sheetHtml).href, { waitUntil: 'load' });
   const sheetPath = path.join(outDir, a.sheetName || 'sheet.png');
