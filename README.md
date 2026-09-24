@@ -9,7 +9,7 @@ docs and a render harness. Roost, Held and Nonpareil were made with it next.
 
 ## Films
 
-All are 1080 × 1080, 30 fps. MP4s are on the
+All are 1080 × 1080, 30 fps, except One Tulip a Day (1920 × 1080, 24 fps). MP4s are on the
 [v1.0 release](https://github.com/sevenevesai/riso-windowseat/releases/tag/v1.0). To watch the
 source instead, open any `index.html` in a browser and press play.
 
@@ -21,6 +21,7 @@ source instead, open any `index.html` in a browser and press play.
 | [Nonpareil](films/nonpareil/) | 70 s | Paper marbling from the first drop to the one print it makes, scored for handpan |
 | [Lumen](films/lumen/) | 28 s | A seed that contains a sun; the first short, in call-and-response form |
 | [Emergence](films/emergence/) | 28 s | Lumen's sibling: how machines learned to listen, as nine worlds |
+| [One Tulip a Day](films/one-tulip-a-day/) | 132 s | A shy cyclist buys one tulip a day for 270 days, then races her train to say her name; a waltz on CC0 recordings |
 
 ### Climate shorts
 
@@ -110,7 +111,7 @@ breaks determinism.
 
 | Path | Contents |
 |---|---|
-| `films/` | The six riso films and the two climate shorts, each with its `FILM.md`; Window Seat, Roost, Held and Nonpareil include sample credits and bank rebuild scripts |
+| `films/` | The seven riso films and the two climate shorts, each with its `FILM.md`; Window Seat, Roost, Held, Nonpareil and One Tulip a Day include sample credits and bank rebuild scripts |
 | `prints/workings/` | A still print series and the print kit new works start from |
 | `docs/` | The craft: brief, visual development, drawing, scene space, motion, sound, quality bar |
 | `studies/` | Interactive A/B studies of each technique, the sound kit, and the climate pitches' style tests |
@@ -126,4 +127,5 @@ Roost are VSCO 2 Community Edition by Versilian Studios under CC0 1.0; see
 [`AUDIO-SOURCES.md`](films/roost/AUDIO-SOURCES.md). Held's instruments are from Versilian's VCSL
 and VSCO 2, also CC0 1.0; see [`AUDIO-SOURCES.md`](films/held/AUDIO-SOURCES.md). Nonpareil's
 handpan is GAMEDRIX974's HandPan pack on Freesound and its cello and contrabass are from VSCO 2,
-all CC0 1.0; see [`AUDIO-SOURCES.md`](films/nonpareil/AUDIO-SOURCES.md).
+all CC0 1.0; see [`AUDIO-SOURCES.md`](films/nonpareil/AUDIO-SOURCES.md). One Tulip a Day's recordings are from VSCO 2 CE, VCSL and
+BigSoundBank, all CC0 1.0; see [`AUDIO-SOURCES.md`](films/one-tulip-a-day/AUDIO-SOURCES.md).
