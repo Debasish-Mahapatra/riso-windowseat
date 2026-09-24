@@ -80,6 +80,10 @@ at terminal velocity throughout and still airborne at the end.
   subject from passage time so changing content can't restart radius, position or velocity.
   Lumen's `memoryRadius(t)` replaced per-shot radii that visibly jumped. Local scene time only
   when a new action actually begins.
+- Switching motion regimes (keyed to held, free to attached) must match position and velocity.
+  Held's catch kinked where a keyed fall handed to an ease from rest. Key with velocities
+  (`hk`, `Space.hermite`), start from the previous state, put contacts where geometry actually
+  crosses, and blend over a few frames.
 
 ## Loops and recycled marks
 
@@ -117,6 +121,12 @@ departure after it has gone.
   whip read as release, not wobble. The branch is `settle(u, {bounces: 3, damp: 4.2})`.
 - Put follow-through on something big: a reed tip moving 70 px on a 13 px stem read as nothing at
   strip scale.
+- Loose parts on a moving holder (tail, slack line, strands) need dynamics, with the holder's
+  position a function of `t`. Short strands: convolve its past acceleration (~0.7 s at 60 Hz)
+  with a damped pendulum's impulse response, so they overshoot and settle. Ropes: integrate a
+  Verlet chain once at load, record at 60 Hz, interpolate ([Held](../films/held/FILM.md)
+  `simChain`, `gripAt`). A velocity lean never overshoots; resampling the holder's past path
+  jumped whenever it spun.
 - An early exit leaves dead cells; time exits to clear frame at the end of the shot.
 
 ## Tone on a moving element
@@ -209,6 +219,9 @@ node shoot.mjs ../films/<name>/index.html --range 6.6:6.9:0.0333333333 --sheet -
 - Flicker is measured, not eyeballed: count the pixels that change between adjacent frames inside
   the region (Roost's glitter: 5.4% → 0.1%). A before/after crop that looks identical may simply
   miss the effect.
+- Choppiness is measured, then watched in a silent range render; sheets can't show it. Report
+  each moving point's largest frame-to-frame jump relative to its neighbours (Held's
+  `jitter.mjs`: tail 31.0 → 4.6 px); remaining maxima should be physical events, not jumps.
 - Is a part really still? Diff two frames and print the bounding box: an apparently moving half
   was the other half's branch crossing the midline.
 - Is a seam real? Sample the column: a bright horizon band was ordinary halftone alternating

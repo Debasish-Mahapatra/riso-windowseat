@@ -47,6 +47,35 @@ into printed dark bands. Its compositor is window-seat's, copied.
 | Stable glitter | `GLIT`, `drawWater` | Glints grow and shrink over about 2 s at full ink on a page-fixed column; see `FILM.md` for the flashing version this replaced. |
 | Seeded reedbed | `REEDS`, `drawReeds`, `PLUMEC` | 210 stems with ribbon leaves; plumes on their own lighter plate mask; per-stem sway plus a shared gust. |
 
+## films/held — cut narrative with physical rope, 70 s
+
+A kite's line parts, it tumbles across a town, is snagged by a vane and caught by a sloop. Five
+shots on window-seat's live plates; camera moves are vector reprojections before screening.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Rope and tail physics | `simChain`, `breeze`, `drawTail` | Verlet chain integrated once at load on a 1/240 s step, recorded at 60 Hz and interpolated, so `seek(t)` stays pure. Head node rides the attachment; bows orient from nodes ±2. |
+| Line running through a snag | `gripAt`, `C_GRIP` | Pulls the rope point at arc length s onto a moving point, so line slides through a vane or up a forestay instead of pinning. |
+| Velocity-matched handoff | `hk`, `C_KEYS`, `C_HAND`, `catchKite` | Hermite keys with explicit velocities; after the catch the kite is keyed relative to the masthead from its current position and velocity. |
+| Events derived from simulation | `C_RING` | Where the simulated tail first meets the water, so the splash and its pan follow the physics. |
+| Jitter metric | `chainsAt` (`__riso.chains`), `jitter.mjs` | Screen-space chain points for measuring frame-to-frame jumps; nothing draws them. |
+
+## films/nonpareil — one overhead take, 70 s
+
+Paper marbling from above: drops, stones, rake, comb and a pulled flower, then a sheet rolled on,
+peeled back toward the lens like a page and landed face up, mirrored, beside the tray. The
+compositor is window-seat's; the camera stays overhead and reprojects vectors.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Closed-form marbling | `opMap`, `applyOp`, `mapPoly`, `refine`, `stateAt`, `PREFIX` | Drops and tine passes are bijections of the plane (Jaffer & Lu), so every boundary stays a simple closed curve; stretched edges refine through the map; prefix checkpoints keep `seek(t)` pure. |
+| One list for picture and score | `OPS`, `buildOps`, `beat` | Every drop lands on the 96 BPM grid; the picture, ripples, tools and score all read the same ops. |
+| Bending sheet in perspective | `sheetAt`, `drawSheet`, `CURL`, `LOOP`, `PAT` | A curve across the fold drawn as runs of a baked coverage map, one affine map per run; heights scale by `HCAM/(HCAM − Z)`; screening stays in `compose()`. |
+| Page-turn transfer | `peelAt`, `LOOP`, `PX` | A loop rolling without slipping puts the flap at x = 2a + λ − s, so the print is face up and mirrored by construction and lands exactly at `PX − s`. |
+| Shadow of a rising surface | `castShadow` | Laid on the ground before any of the sheet is drawn; laid again only where the flap overhangs the part still lying down. |
+| Lagging follow camera | `camTail`, `follow`, `sheetMid` | The camera tracks the carried sheet's mean x averaged over the last 0.6 s: a late, smooth follow that stays pure in `t`. |
+| Water on a print | `drawRinse`, `frontV`, `wetRim`, `drawPool`, `RIVULETS` | A wavy front with a glossy band, flow streaks and the window reflected where it is wet; rivulets start on beats and are also score notes. |
+
 ## films/lumen — resonance form, 28 s
 
 A centre dot opens eight worlds through irises and sweeps, recollects them through one

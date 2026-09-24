@@ -41,6 +41,15 @@ shell, attached details, foreground occluders.
 - A contact shadow lies on the receiving plane; a cast shadow follows a chosen light direction.
   Don't offset a generic ellipse under everything. Highlights, hatching and seam spacing turn
   with the surface.
+- A flexible sheet (curl, page turn, peel) is one curve across its fold. Bake its face once as
+  coverage, then draw runs of samples that one affine map can carry, far to near; a point at height
+  Z scales by H/(H − Z) about the frame centre. The face turns over where the projected order along
+  the curve reverses, which also mirrors it. Screening stays in `compose()`, so no screened bitmap
+  is resized (Nonpareil's `sheetAt`, `drawSheet`).
+- A surface rising from the ground casts its shadow on the ground before any of the surface is
+  drawn. Laid between its grounded and raised parts, the shadow printed a 1 px crease where the
+  sheet left the bath; lay it again only where an overhang covers a part still lying down, clipped
+  to that side.
 - Moving camera: transform vector geometry, then screen at final pixel size; never scale a
   screened bitmap to fake a dolly. Cache static coverage per fixed camera and redraw only
   changing geometry. Arbitrary camera motion may exceed the frame budget: measure on the real

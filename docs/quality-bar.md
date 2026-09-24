@@ -48,6 +48,13 @@ mix per [sound.md](sound.md).
 - Pops at cuts where a scene's first frame differs from its settled state.
 - Three inks stacking to undifferentiated brown.
 
+When a passage is rejected as off-pace or lower in quality than an approved one, measure both
+before redesigning: shoot them at the same spacing (0.5 s) and compare mean saturation per frame
+and mean change per step, with 1:1 crops. Nonpareil's rejected tail fell from 0.57–0.62
+saturation to 0.07 on a plain sheet and had 13 of 52 static steps where the approved half had one
+0.5 s run; the redesign held a 0.42 minimum with only the closing hold static
+([FILM.md](../films/nonpareil/FILM.md)).
+
 ## Review cases
 
 Representative tasks for testing a change to a skill or technique, not a suite run on every

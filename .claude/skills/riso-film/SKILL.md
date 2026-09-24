@@ -27,7 +27,7 @@ what changes, a readable arrival/hold, and where the eye goes at the next cut. K
 motion, camera motion, transition and atmosphere distinct. `docs/forms/resonance.md` is an
 optional call-and-response form (used by `films/lumen` and `films/emergence`); use it only when
 asked or deliberately chosen. A single journey through one fixed frame (`films/window-seat`) or
-one continuous take of one event (`films/roost`) is an equally valid alternative to a montage. Preserve approved direction in revisions.
+one continuous take of one event (`films/roost`, `films/nonpareil`) is an equally valid alternative to a montage. Preserve approved direction in revisions.
 
 ## 2. Prove the hard part first
 
@@ -35,8 +35,9 @@ Before filling a timeline, inspect real subject references and build one represe
 frame. For complex art, compare small viewpoint/value thumbnails first. When the request remakes
 a known video, measure the file itself (cuts, shots, actions) before choosing what to keep. A real
 person's likeness is measured on a reference grid and checked in a side-by-side debug render
-(`docs/visual-development.md`, people). Fix generic silhouettes and inconsistent perspective
-before adding grain, hatching or more scenes.
+(`docs/visual-development.md`, people). Hands and arms get the same care: a posable 3D hand per
+grip compared beside photographs of that grip, and 3D-solved arms, tuned before shots. Fix
+generic silhouettes and inconsistent perspective before adding grain, hatching or more scenes.
 
 Then build a short sample of the hardest action: the subject doing something, not just arriving.
 Check attachments, mass, timing and aftermath. For a long film, make a full-duration silent rough
@@ -77,7 +78,8 @@ node shoot.mjs ../films/<name>/index.html --range 6.6:6.9:0.0333333333 --sheet -
 
 Use this film's event times. Read every sheet you generate. `verify.mjs` proves seek purity in
 both browsers across the actual duration and shot boundaries; it proves repeatability, not beauty
-or stable adjacent-frame texture, and a sheet cannot judge pacing at speed.
+or stable adjacent-frame texture, and a sheet cannot judge pacing or choppiness at speed. Measure
+jitter in moving chains and watch a silent range render (`docs/motion.md`, judging motion).
 
 Inspect frame-spaced strips around handoffs, contacts, mask completions and visible wraps, on both
 sides of each reset. For a retimable effect check 0.5x, 1x and 2x and move coupled clocks and holds

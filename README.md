@@ -3,7 +3,7 @@
 Procedural risograph films and prints, each a single `index.html` of Canvas 2D and Web Audio:
 no libraries, fonts, images or network calls. The repo began as the release of **Window Seat**.
 Making it, and the two shorts before it, produced a reusable kit of Claude Code skills, craft
-docs and a render harness. Roost was made with it next.
+docs and a render harness. Roost, Held and Nonpareil were made with it next.
 
 ![Window Seat, dawn from the viaduct](films/window-seat/poster.png)
 
@@ -17,6 +17,8 @@ source instead, open any `index.html` in a browser and press play.
 |---|---|---|
 | [Window Seat](films/window-seat/) | 78 s | A night train journey through one window, scored for piano |
 | [Roost](films/roost/) | 70 s | One take of a starling murmuration from sunset to roost, scored for strings |
+| [Held](films/held/) | 70 s | A kite that flies only while something holds its line, scored for found instruments |
+| [Nonpareil](films/nonpareil/) | 70 s | Paper marbling from the first drop to the one print it makes, scored for handpan |
 | [Lumen](films/lumen/) | 28 s | A seed that contains a sun; the first short, in call-and-response form |
 | [Emergence](films/emergence/) | 28 s | Lumen's sibling: how machines learned to listen, as nine worlds |
 
@@ -58,6 +60,23 @@ is the halftone: where the sheet turns edge-on, the birds pile into dark printed
 falcon stoops through it and the flock pours into the reeds at nightfall. The string score is
 timed from the picture.
 
+### Held
+
+A paper kite's line frays and parts at a hillside stake. Loose, it can only tumble; it falls
+across a harbour town, is snagged for a moment by a church weathervane, and over the water its
+line catches on a sloop's forestay, so the kite climbs again, held by the boat sailing into
+dusk. Its tail and loose line are simulated ropes. The score uses CC0 mbira, harp, glockenspiel,
+chimes, strings and flute, with every cue read from the picture's events.
+
+### Nonpareil
+
+Paper marbling seen straight down into the bath. Drops of colour land on the beat and push each
+other outward; a rake and a fine comb drag them into the nonpareil pattern, and a flower is
+dropped and pulled into the middle. A sheet unrolls across the bath, is peeled back toward the
+lens like a turning page, and lands face up and mirrored beside the emptied tray. The marbling
+is closed-form geometry, so every frame is exact. The drops are the handpan's notes, over a
+slow cello and contrabass line.
+
 ## How they're made
 
 I directed each film; Claude Code (Anthropic's coding agent) wrote the code, using the skills,
@@ -91,7 +110,7 @@ breaks determinism.
 
 | Path | Contents |
 |---|---|
-| `films/` | The four riso films and the two climate shorts, each with its `FILM.md`; Window Seat and Roost include sample credits and bank rebuild scripts |
+| `films/` | The six riso films and the two climate shorts, each with its `FILM.md`; Window Seat, Roost, Held and Nonpareil include sample credits and bank rebuild scripts |
 | `prints/workings/` | A still print series and the print kit new works start from |
 | `docs/` | The craft: brief, visual development, drawing, scene space, motion, sound, quality bar |
 | `studies/` | Interactive A/B studies of each technique, the sound kit, and the climate pitches' style tests |
@@ -104,4 +123,7 @@ MIT, see [LICENSE](LICENSE). The piano recordings embedded in Window Seat are Sa
 Piano V3 by Alexander Holm under CC BY 3.0; see
 [`AUDIO-SOURCES.md`](films/window-seat/AUDIO-SOURCES.md). The string recordings embedded in
 Roost are VSCO 2 Community Edition by Versilian Studios under CC0 1.0; see
-[`AUDIO-SOURCES.md`](films/roost/AUDIO-SOURCES.md).
+[`AUDIO-SOURCES.md`](films/roost/AUDIO-SOURCES.md). Held's instruments are from Versilian's VCSL
+and VSCO 2, also CC0 1.0; see [`AUDIO-SOURCES.md`](films/held/AUDIO-SOURCES.md). Nonpareil's
+handpan is GAMEDRIX974's HandPan pack on Freesound and its cello and contrabass are from VSCO 2,
+all CC0 1.0; see [`AUDIO-SOURCES.md`](films/nonpareil/AUDIO-SOURCES.md).

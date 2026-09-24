@@ -53,6 +53,31 @@ tempo, cues and pan are measured from the projected flock.
 | Marks | `SCORE_MARKS` | Five cues from `FLIGHT_SCORE.cue`, exposed as `__riso.marks`. |
 | Attribution in exports | `AUDIO_CREDIT`, `wavBase64` | Same WAV `LIST/INFO` credit as window-seat. |
 
+## films/held — found CC0 instruments, 70 s
+
+Mbira, glockenspiel, hand chimes, harp, cello, violin pizzicato and flute from VCSL and
+VSCO-2-CE, in B pentatonic, with kit synthesis only for weather and contact.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Embedded FLAC samples | `SAMPLES`, `loadSamples` | 16-bit mono 32 kHz FLAC, lossless, so both browsers decode the same samples. Rebuilt by `build-samples.py`; sources in `AUDIO-SOURCES.md`. |
+| Sampler voices | `samp`, `bowed` | Nearest root repitched by rate; `bowed` crossfades retriggers past the bow attack for notes longer than a sample. |
+| Cues from picture constants | `buildScore` (`spins`), `K_SNAP`, `L_SNAG`, `C_TAUT`, `E_LAMP` | Every cue reads the picture's event constants; tumble runs sit on the keyed spin times. |
+| Dry room for recorded samples | `room.wet` in `buildScore`, `samp` (`send * .4`) | Samples carry their own rooms. With the kit's reverb at wet .3, stereo correlation fell to 0.02; at .035 it is 0.72. |
+
+## films/nonpareil — sampled handpan, 70 s
+
+A D Celtic minor handpan (Freesound CC0 previews, embedded as Ogg) over VSCO 2 cello and
+contrabass. Nearly every note is a picture event: a drop, a pin crossing, an edge.
+
+| Technique | Where | Why copy it |
+|---|---|---|
+| Drops are notes | `scoreGround`, `scoreStones`, `panOf`, `pan1` | Each landing plays a handpan tone panned by its x; brush taps are rolls with muted ghost taps. |
+| Runs clocked by a moving edge | `crossings` (tool ops), `crossAt` (any `pos(t)`) | Times at which a pin, contact line or water front crosses evenly spaced lines: one tone per band, in the order it meets them. |
+| Tuned transition swell | `edgeGesture`, `edges`, `reversedOf` | A lead-instrument recording played backwards into the edge's mid-frame crossing, its decay undone so the rise starts with the edge, then forwards out. It replaced noise-grain paper slides the user heard as static; `GESTURE = 'resonance'` keeps the measured alternative. |
+| Cue from picture geometry | `flowerFlip`, `flipBeat` | The mirrored motif lands when the sheet sample under the flower turns face up, snapped to the half-beat grid. |
+| Bass line as data | `bassLine`, `scoreBass`, `bowSpan` | Roots change on picture events; a note longer than a recording is overlapping bows, so moving the next entry re-cuts the held note before it. |
+
 ## films/lumen — procedural score, 28 s
 
 A self-contained score that does not use the shared kit: its voices are nested inside
