@@ -1,0 +1,628 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Snowman · linocut</title>
+<style>html,body{margin:0;background:#222}canvas{display:block;width:1280px;height:720px}</style>
+<canvas id="c"></canvas>
+<script src="kit.js"></script>
+<script>
+'use strict';
+/* SNOWMAN — linocut style frame. Two blocks, black and red, printed on cream
+   paper. Every mark is either ink left standing on the block or a gouge cut
+   away from it: the black plate is an alpha mask where 'ink' adds and 'cut'
+   removes, then both plates get roller and paper texture and are printed
+   with multiply, the red slightly out of register.
+   Scene: 1994, a hill village at dusk under a full moon. A six-year-old on an
+   upturned crate pushes the carrot nose into a snowman taller than his dad. */
+
+const W = 1920, H = 1080, HZ = 580;               // eye level of a child-height camera
+const PAPER = rgb('#eee6d2'), BLACK = rgb('#1d191a'), RED = rgb('#c23b2b');
+const pxm = y => (y - HZ) / 1.2;                   // px per metre on the ground at screen y
+
+/* ── marks ────────────────────────────────────────────────────────────────── */
+function mode(c, m) {
+  c.globalCompositeOperation = m === 'cut' ? 'destination-out' : 'source-over';
+  c.fillStyle = '#000'; c.strokeStyle = '#000';
+}
+function shape(c, pts, m = 'ink') { mode(c, m); fillPts(c, pts); }
+function disc(c, x, y, r, m = 'ink') { mode(c, m); c.beginPath(); c.arc(x, y, r, 0, TAU); c.fill(); }
+/** A carving-tool mark along a polyline. 'v' enters sharp and lifts out long,
+ *  'u' is round-ended, 'even' keeps its width (keylines left standing). */
+function gouge(c, pts, w, m = 'cut', prof = 'v') {
+  const f = prof === 'v' ? s => w * Math.pow(clamp(s / .16), .6) * Math.pow(clamp((1 - s) / .34), .8)
+    : prof === 'u' ? s => w * Math.pow(clamp(s / .04), .5) * Math.pow(clamp((1 - s) / .06), .5)
+    : prof === 'in' ? s => w * Math.pow(clamp((1 - s) / .5), .7)
+    : () => w;
+  if (pts.length < 2) return;
+  mode(c, m); fillPts(c, taper(pts, f));
+  if (prof === 'u' || prof === 'even') { const a = pts[0], b = pts[pts.length - 1]; c.beginPath(); c.arc(a[0], a[1], w, 0, TAU); c.arc(b[0], b[1], w, 0, TAU); c.fill(); }
+}
+const line = (a, b, n = 12) => Array.from({ length: n + 1 }, (_, i) => [lerp(a[0], b[0], i / n), lerp(a[1], b[1], i / n)]);
+function clipped(c, pts, fn) { c.save(); c.beginPath(); trace(c, pts); c.clip(); fn(); c.restore(); }
+/** Midpoint-displaced line from a to b: a hand-cut ridge. */
+function fractal(a, b, depth, amp, r) {
+  if (!depth) return [a];
+  const m = [(a[0] + b[0]) / 2 + gauss(r) * amp * .35, (a[1] + b[1]) / 2 + gauss(r) * amp];
+  return [...fractal(a, m, depth - 1, amp * .55, r), ...fractal(m, b, depth - 1, amp * .55, r)];
+}
+/** Offset a closed outline outward by d px (for white separation halos). */
+function grow(pts, d) {
+  let cx = 0, cy = 0; pts.forEach(p => { cx += p[0]; cy += p[1]; }); cx /= pts.length; cy /= pts.length;
+  return pts.map(([x, y]) => { const dx = x - cx, dy = y - cy, l = Math.hypot(dx, dy) || 1; return [x + dx / l * d, y + dy / l * d]; });
+}
+/** A limb as a closed tapered tube along joints. */
+function limb(pts, w0, w1) { return taper(curve(pts, false, 8), s => lerp(w0, w1, s)); }
+
+/* ── sky ──────────────────────────────────────────────────────────────────── */
+const MOON = [1640, 150, 70];
+const TITLE_BOX = [60, 50, 600, 175];
+function sky(k) {
+  mode(k, 'ink'); k.fillRect(0, 0, W, 660);
+  const [mx, my, mr] = MOON, r = rngFor('sky:rings');
+  // moonlight carved as broken rings, thinning outward
+  for (let i = 0; i < 9; i++) {
+    const rad = mr + 22 + i * 17, w = 3.4 * (1 - i / 10) + .5;
+    let a = r() * TAU;
+    const end = a + TAU;
+    while (a < end) {
+      const len = range(r, .25, 1.1) * (1 - i / 14), gap = range(r, .06, .22) + i * .03;
+      const pts = [];
+      for (let s = 0; s <= 16; s++) { const t = a + len * s / 16, rr = rad + Math.sin(t * 3 + i) * 2; pts.push([mx + Math.cos(t) * rr, my + Math.sin(t) * rr]); }
+      if (r() > i * .06) gouge(k, pts, w);
+      a += len + gap;
+    }
+  }
+  disc(k, mx, my, mr, 'cut');
+  // the moon's seas: a few marks left standing
+  const rs = rngFor('moon:seas');
+  for (let i = 0; i < 7; i++) {
+    const a0 = range(rs, 2.2, 4.1), rr = mr * range(rs, .35, .8), l = range(rs, .25, .55);
+    gouge(k, curve([0, .5, 1].map(u => [mx + Math.cos(a0 + u * l) * rr, my + Math.sin(a0 + u * l) * rr]), false, 6), range(rs, 1.4, 3), 'ink');
+  }
+  // stars: little cross cuts, kept off the moon's halo and the title
+  const st = rngFor('sky:stars');
+  for (let i = 0; i < 90; i++) {
+    const x = st() * W, y = st() * 330, s = range(st, 2, 7);
+    if (Math.hypot(x - mx, y - my) < mr + 170) continue;
+    if (x > TITLE_BOX[0] - 20 && x < TITLE_BOX[2] + 20 && y > TITLE_BOX[1] - 20 && y < TITLE_BOX[3] + 20) continue;
+    if (st() < .45) { disc(k, x, y, s * .28, 'cut'); continue; }
+    gouge(k, line([x - s, y], [x + s, y], 4), s * .22, 'cut', 'v');
+    gouge(k, line([x, y - s], [x, y + s], 4), s * .22, 'cut', 'v');
+  }
+}
+
+/* ── mountains ────────────────────────────────────────────────────────────── */
+const PEAKS = [[-80, 360], [130, 292], [340, 334], [560, 238], [770, 322], [1000, 180], [1190, 298], [1350, 252], [1560, 352], [1770, 324], [2010, 380]];
+function mountains(k) {
+  const r = rngFor('mtn');
+  const valleys = [];
+  for (let i = 0; i < PEAKS.length - 1; i++) {
+    const a = PEAKS[i], b = PEAKS[i + 1];
+    valleys.push([(a[0] + b[0]) / 2 + range(r, -40, 40), Math.max(a[1], b[1]) + range(r, 28, 70)]);
+  }
+  const segs = [];     // segs[2i] = peak i → valley i, segs[2i+1] = valley i → peak i+1
+  for (let i = 0; i < valleys.length; i++) {
+    const p = PEAKS[i], v = valleys[i], q = PEAKS[i + 1];
+    segs.push(fractal(p, v, 5, Math.hypot(v[0] - p[0], v[1] - p[1]) * .07, r).concat([v]));
+    segs.push(fractal(v, q, 5, Math.hypot(q[0] - v[0], q[1] - v[1]) * .07, r).concat([q]));
+  }
+  const ridge = segs.flat();
+  shape(k, [...ridge, [2010, 700], [-80, 700]], 'cut');
+  // each peak's west face lies in shadow, moonlight comes from the upper right
+  for (let i = 1; i < PEAKS.length - 1; i++) {
+    const P = PEAKS[i], VL = valleys[i - 1];
+    const left = segs[2 * i - 1];                          // VL → P
+    const B = [P[0] + range(r, -70, 30), 700], G = [VL[0] + range(r, -20, 20), 700];
+    const spine = fractal(P, B, 5, 40, r).concat([B]);
+    const gully = fractal(G, VL, 4, 18, r).concat([VL]);
+    const face = [...left, ...spine.slice(1), ...gully.slice(0, -1)];
+    shape(k, face, 'ink');
+    // cut hatching down the face: strong under the ridge, fading into solid dark
+    const d = [VL[0] - P[0], VL[1] - P[1]], dl = Math.hypot(...d), ux = d[0] / dl, uy = d[1] / dl;
+    const nx = uy, ny = -ux;                                // points down into the face
+    clipped(k, face, () => {
+      gouge(k, left.map(([x, y]) => [x + nx * 3, y + ny * 3]), 2.2, 'cut', 'v');   // the corniced crest catching light
+      for (let j = 1; j < 18; j++) {
+        const off = 4 + j * 8.5 + range(r, -1.5, 1.5), w = 3.4 * Math.pow(1 - j / 18, 1.3);
+        if (w < .45) break;
+        let s = -range(r, 0, 60);
+        while (s < dl + 40) {
+          const len = range(r, 40, 160);
+          const a = [P[0] + ux * s + nx * off, P[1] + uy * s + ny * off];
+          const b = [a[0] + ux * len, a[1] + uy * len];
+          gouge(k, line(a, b, 8).map(([x, y], q) => [x, y + Math.sin(q * .9 + j) * 1.2]), w);
+          s += len + range(r, 10, 40);
+        }
+      }
+    });
+    for (let j = 0; j < 7; j++) {
+      const t = range(r, .15, .85), sx = lerp(VL[0], P[0], t), sy = lerp(VL[1], P[1], t) + range(r, 60, 150), len = range(r, 30, 90);
+      clipped(k, face, () => gouge(k, line([sx, sy], [sx - len * .15, sy + len], 6), range(r, 1.2, 2.4), 'cut', 'v'));
+    }
+    // the lit east face: a few rock marks left standing along the fall line
+    const VR = valleys[i];
+    for (let j = 0; j < 12; j++) {
+      const t = range(r, .05, .7), sx = lerp(P[0], VR[0], t) + range(r, -10, 30), sy = lerp(P[1], VR[1], t) + range(r, 8, 40);
+      const len = range(r, 18, 70);
+      gouge(k, line([sx, sy], [sx + len * .38, sy + len], 6), range(r, 1, 2.6), 'ink', 'v');
+    }
+  }
+}
+
+/* ── the far forest band and the hill's edge ──────────────────────────────── */
+const edgeY = x => 620 + 5 * Math.sin(x / 210) + 4 * Math.sin(x / 77 + 1);
+function forestBand(k, rp) {
+  const r = rngFor('band');
+  mode(k, 'ink'); k.fillRect(0, 596, W, 40);
+  for (const [row, base, h0, h1] of [[0, 588, 22, 36], [1, 603, 30, 50]]) {
+    for (let x = -10; x < W + 10; x += range(r, 8, 15)) {
+      const h = range(r, h0, h1), w = h * range(r, .28, .38), b = base + range(r, -3, 3), tx = x + range(r, -2, 2);
+      const pts = [[tx, b - h]];
+      for (let t = 1; t <= 4; t++) pts.push([tx + w * t / 4 + (t % 2 ? 2 : -1), b - h + h * t / 4 - (t % 2 ? 0 : h * .08)]);
+      for (let t = 4; t >= 1; t--) pts.push([tx - w * t / 4 - (t % 2 ? 2 : -1), b - h + h * t / 4 - (t % 2 ? 0 : h * .08)]);
+      shape(k, pts, 'ink');
+      for (let t = 1; t <= 3; t++) {         // snow on the tiers
+        const y = b - h + h * t / 4 - h * .06, hw = w * t / 4 * .7;
+        if (r() < .7) gouge(k, [[tx - hw, y + 1.5], [tx, y - 1], [tx + hw * .8, y + 1]], 1.1, 'cut', 'v');
+      }
+    }
+  }
+  // a village across the valley: tiny roofs and lit windows
+  for (let i = 0; i < 11; i++) {
+    const x = 1420 + i * 32 + range(r, -8, 8), y = 606 + range(r, -6, 4), s = range(r, 5, 8);
+    shape(k, [[x - s * 1.3, y], [x, y - s * 1.1], [x + s * 1.3, y]], 'cut');
+    mode(rp, 'ink'); rp.fillRect(x - 2, y + 2, 3.4, 3.4);
+  }
+  // the near slope, carved clean below its edge
+  const edge = [];
+  for (let x = -10; x <= W + 10; x += 6) edge.push([x, edgeY(x)]);
+  shape(k, [...edge, [W + 10, H + 10], [-10, H + 10]], 'cut');
+}
+
+/* ── deodars ──────────────────────────────────────────────────────────────── */
+function deodar(k, x, base, h, key) {
+  const r = rngFor('deodar:' + key), top = base - h, tw = h * .03;
+  shape(k, [[x - tw, base + 2], [x - tw * .4, top + h * .12], [x + tw * .4, top + h * .12], [x + tw, base + 2]], 'ink');
+  const tiers = Math.round(h / 40), snow = [];
+  for (let j = 0; j <= tiers; j++) {
+    const u = j / tiers, y = top + h * (.03 + .8 * u);
+    const half = h * (.035 + .29 * Math.pow(u, .95)) * range(r, .8, 1.15), th = h * (.04 + .02 * u);
+    const lean = range(r, -.08, .08) * half, droop = th * .9;
+    const upper = curve([[x - half, y + droop], [x - half * .45 + lean, y - th * .35], [x + lean * .3, y - th], [x + half * .45 + lean, y - th * .35], [x + half, y + droop]], false, 6);
+    const lower = [], nc = 2 * (3 + Math.round(half / 22));
+    for (let s = 0; s <= nc; s++) {
+      const t = s / nc, lx = lerp(x + half, x - half, t), dip = Math.sin(t * Math.PI);
+      lower.push([lx + range(r, -2, 2), y + droop - dip * th * .3 + (s % 2 ? th * range(r, .45, 1) : 0)]);
+    }
+    shape(k, [...upper, ...lower], 'ink');
+    snow.push(upper);
+  }
+  // snow lies along each tier's upper edge
+  snow.forEach((up, j) => {
+    const rr = rngFor('deodar-snow:' + key + j);
+    const band = up.slice(3, up.length - 3), inner = band.map(([px, py], i) => [px, py + range(rr, 3, 7) + (i % 5 === 0 ? 3 : 0)]).reverse();
+    shape(k, [...band.map(([px, py]) => [px, py - 1]), ...inner], 'cut');
+  });
+}
+
+/* ── the house ────────────────────────────────────────────────────────────── */
+const DOOR = [190, 514, 265, 680];
+function house(k, rp) {
+  const r = rngFor('house');
+  const apex = [340, 236], eL = [34, 474], eR = [646, 474];
+  // walls: kath-kuni timber and stone, dark
+  shape(k, [[78, 470], [602, 470], [602, 684], [78, 684]], 'ink');
+  // gable facade under the verges: planks
+  shape(k, [apex, [598, 470], [82, 470]], 'ink');
+  for (let y = 300; y < 470; y += 13) {
+    const t = (y - apex[1]) / (470 - apex[1]), hw = 258 * t - 14;
+    if (hw > 10) gouge(k, [[340 - hw, y], [340 + hw, y + 1]], 1.6, 'cut', 'v');
+  }
+  // round gable window, lit
+  disc(k, 340, 395, 30, 'cut'); disc(rp, 340, 395, 30, 'ink');
+  gouge(k, [[340, 365], [340, 425]], 3, 'ink', 'even'); gouge(k, [[310, 395], [370, 395]], 3, 'ink', 'even');
+  mode(k, 'ink'); k.lineWidth = 7; k.beginPath(); k.arc(340, 395, 31, 0, TAU); k.stroke();
+  // verges with carved pendants, and the snow riding the roof
+  const roof = [eL, [eL[0] - 8, eL[1] - 14], [apex[0], apex[1] - 22], [eR[0] + 8, eR[1] - 14], eR, [eR[0] - 16, eR[1] + 2], [apex[0], apex[1] + 16], [eL[0] + 16, eL[1] + 2]];
+  shape(k, roof, 'ink');
+  for (let t = .06; t < .98; t += .07) {
+    for (const [a, b] of [[apex, eL], [apex, eR]]) {
+      const x = lerp(a[0], b[0], t), y = lerp(a[1], b[1], t) + 16;
+      shape(k, [[x - 4, y - 2], [x + 4, y - 2], [x + 2, y + 8], [x, y + 12], [x - 2, y + 8]], 'ink');
+    }
+    for (const [a, b] of [[apex, eL], [apex, eR]]) disc(k, lerp(a[0], b[0], t), lerp(a[1], b[1], t) - 3, 2.2, 'cut');
+  }
+  const snowTop = [], snowBot = [];
+  for (let s = 0; s <= 40; s++) {
+    const t = s / 40, side = t < .5 ? eL : eR, u = t < .5 ? 1 - t * 2 : (t - .5) * 2;
+    const x = lerp(apex[0], side[0] + (t < .5 ? -14 : 14), u), y = lerp(apex[1] - 22, side[1] - 14, u);
+    snowTop.push([x, y - 20 - Math.abs(Math.sin(s * 1.7)) * 6 - range(r, 0, 4)]);
+    snowBot.push([x, y + 2]);
+  }
+  shape(k, [...snowTop, [eR[0] + 24, eR[1] - 2], [eR[0] + 10, eR[1] + 4], ...snowBot.reverse(), [eL[0] - 10, eL[1] + 4], [eL[0] - 24, eL[1] - 2]], 'cut');
+  // icicles under the eaves
+  for (const [a, b] of [[apex, eL], [apex, eR]]) {
+    for (let t = .55; t < 1; t += range(r, .03, .06)) {
+      const x = lerp(a[0], b[0], t), y = lerp(a[1], b[1], t) + 30, l = range(r, 8, 30);
+      shape(k, [[x - 3, y], [x + 3, y], [x + .5, y + l]], 'cut');
+    }
+  }
+  // chimney and its smoke
+  shape(k, [[492, 380], [492, 296], [532, 296], [532, 350]], 'ink');
+  for (let y = 305; y < 360; y += 12) gouge(k, [[495, y], [529, y + 1]], 1.2, 'cut', 'u');
+  shape(k, [[486, 298], [492, 286], [512, 282], [530, 286], [538, 298]], 'cut');
+  const sm = [];
+  for (let s = 0; s <= 40; s++) { const t = s / 40; sm.push([512 - t * 60 + Math.sin(t * 9) * 16 * t, 280 - t * 110]); }
+  gouge(k, sm, 9, 'cut', 'in');
+  gouge(k, sm.map(([x, y], i) => [x + 14 + Math.sin(i * .4) * 3, y + 10]).slice(4, 30), 3.2, 'cut', 'v');
+  // balcony: rail and balusters cut out of the timber band
+  gouge(k, [[88, 482], [592, 482]], 2.2, 'cut', 'even');
+  gouge(k, [[88, 512], [592, 512]], 2.2, 'cut', 'even');
+  for (let x = 96; x < 590; x += 11) gouge(k, [[x, 486], [x, 508]], 2.2, 'cut', 'u');
+  // stone courses between timber bands on the ground storey
+  for (const y of [556, 612]) { gouge(k, [[84, y], [596, y]], 1.4, 'cut', 'even'); gouge(k, [[84, y + 9], [596, y + 9]], 1.4, 'cut', 'even'); }
+  for (const [y0, y1] of [[520, 552], [570, 608], [626, 684]]) {
+    let x = 84 + range(r, 0, 20);
+    for (let row = y0; row < y1 - 6; row += 17) {
+      x = 84 + range(r, 0, 26);
+      while (x < 590) {
+        const w = range(r, 26, 52), hgt = Math.min(15, y1 - row - 2);
+        gouge(k, [[x, row + 2], [x + w, row + 1.5], [x + w, row + hgt], [x, row + hgt], [x, row + 2]], .9, 'cut', 'even');
+        x += w + 5;
+      }
+    }
+  }
+  // lit door with the father in it, waving
+  const [dx0, dy0, dx1, dy1] = DOOR;
+  shape(k, [[dx0, dy0], [dx1, dy0], [dx1, dy1], [dx0, dy1]], 'cut');
+  mode(rp, 'ink'); rp.fillRect(dx0, dy0, dx1 - dx0, dy1 - dy0);
+  mode(k, 'ink'); k.lineWidth = 9; k.strokeRect(dx0 - 4, dy0 - 4, dx1 - dx0 + 8, dy1 - dy0 + 8);
+  for (let x = dx0 - 4; x < dx1 + 4; x += 9) gouge(k, [[x, dy0 - 10], [x + 4, dy0 - 10]], 1.8, 'cut', 'u');
+  father(k, 227, 680);
+  // window beside the door
+  for (const [x0, y0, w, h] of [[330, 540, 86, 70], [470, 540, 60, 62]]) {
+    shape(k, [[x0, y0], [x0 + w, y0], [x0 + w, y0 + h], [x0, y0 + h]], 'cut');
+    mode(rp, 'ink'); rp.fillRect(x0, y0, w, h);
+    mode(k, 'ink'); k.lineWidth = 8; k.strokeRect(x0 - 4, y0 - 4, w + 8, h + 8);
+    gouge(k, [[x0 + w / 2, y0], [x0 + w / 2, y0 + h]], 2.6, 'ink', 'even');
+    gouge(k, [[x0, y0 + h * .45], [x0 + w, y0 + h * .45]], 2.6, 'ink', 'even');
+    shape(k, [[x0 - 10, y0 + h + 4], [x0 + w + 10, y0 + h + 4], [x0 + w + 6, y0 + h - 4], [x0 + w / 2, y0 + h - 7], [x0 - 6, y0 + h - 4]], 'cut');
+  }
+  // woodpile against the wall
+  for (let row = 0; row < 4; row++) for (let i = 0; i < 6 - (row > 1 ? 1 : 0); i++) {
+    const x = 486 + i * 19 + (row % 2) * 9, y = 672 - row * 17, rr = range(r, 7.5, 9.5);
+    disc(k, x, y, rr + 2.2, 'ink'); disc(k, x, y, rr - .5, 'cut'); disc(k, x, y, rr * .45, 'ink'); disc(k, x, y, rr * .18, 'cut');
+  }
+  // drifts banked against the wall and the doorstep
+  const drift = [[60, 690]];
+  for (let x = 60; x <= 624; x += 12) {
+    const nearDoor = x > dx0 - 20 && x < dx1 + 20;
+    drift.push([x, (nearDoor ? 676 : 652 + Math.sin(x / 37) * 7 + Math.sin(x / 11) * 2.5)]);
+  }
+  drift.push([624, 690]);
+  shape(k, drift, 'cut');
+  gouge(k, [[dx0 - 16, 680], [dx1 + 16, 681]], 2.4, 'ink', 'v');
+}
+function father(k, x, base) {
+  // backlit, so a plain dark cut-out: 1.75 m at the house's depth
+  const s = pxm(base) * 1.75 / 100;       // units: percent of height
+  const P = (u, v) => [x + u * s, base - v * s];
+  shape(k, [P(-7, 0), P(-8, 44), P(-12, 50), P(-12, 78), P(-8, 83), P(8, 83), P(12, 78), P(12, 50), P(8, 44), P(7, 0), P(2, 0), P(0, 40), P(-2, 0)], 'ink');
+  shape(k, ellipsePts(x, base - 90 * s, 6.5 * s, 7.5 * s, 20), 'ink');
+  shape(k, limb([P(10, 79), P(20, 88), P(22, 106)], 3.4 * s, 2.8 * s), 'ink');   // waving arm
+  shape(k, ellipsePts(x + 22 * s, base - 108 * s, 3.2 * s, 3.8 * s, 12), 'ink');
+  shape(k, limb([P(-10, 79), P(-13, 64), P(-12, 51)], 3.4 * s, 2.8 * s), 'ink');
+}
+
+/* ── fence ────────────────────────────────────────────────────────────────── */
+function fence(k) {
+  const r = rngFor('fence');
+  const posts = [[1486, 780], [1606, 744], [1712, 716], [1800, 697], [1876, 682], [1944, 670]].map(([x, y]) => ({ x, y, h: 1.15 * pxm(y), w: .11 * pxm(y) }));
+  for (let i = 0; i < posts.length - 1; i++) {
+    const a = posts[i], b = posts[i + 1];
+    for (const f of [.42, .84]) {
+      const p = [a.x, a.y - a.h * f], q = [b.x, b.y - b.h * f], th = .06 * pxm(a.y);
+      shape(k, [[p[0], p[1] - th / 2], [q[0], q[1] - th * .35], [q[0], q[1] + th * .35], [p[0], p[1] + th / 2]], 'ink');
+      gouge(k, line([p[0] + 4, p[1] - th / 2 - 1], [q[0] - 4, q[1] - th * .35 - 1], 10).map(([x, y], j) => [x, y - (j % 3 ? 1 : 2.5)]), th * .45, 'cut', 'u');
+    }
+  }
+  for (const p of posts) {
+    shape(k, [[p.x - p.w / 2, p.y + 2], [p.x - p.w / 2, p.y - p.h], [p.x + p.w / 2, p.y - p.h - p.w * .3], [p.x + p.w / 2, p.y + 2]], 'ink');
+    for (let j = 0; j < 3; j++) gouge(k, line([p.x - p.w * .15 + j * p.w * .12, p.y - p.h * .9], [p.x - p.w * .1 + j * p.w * .1, p.y - p.h * .15], 6), p.w * .04 + .5, 'cut', 'v');
+    shape(k, [[p.x - p.w * .7, p.y - p.h + 2], [p.x - p.w * .5, p.y - p.h - p.w * .55], [p.x, p.y - p.h - p.w * .8], [p.x + p.w * .6, p.y - p.h - p.w * .75], [p.x + p.w * .75, p.y - p.h - p.w * .2]], 'cut');
+    shape(k, [[p.x - p.w * 1.6, p.y + 3], [p.x - p.w * .4, p.y - p.w * .5], [p.x + p.w * .7, p.y - p.w * .4], [p.x + p.w * 2, p.y + 3]], 'cut');
+  }
+}
+
+/* ── the ground: drifts, prints, light and shadow ─────────────────────────── */
+function ground(k) {
+  const r = rngFor('ground');
+  // drift edges, sparse where far, fuller where near
+  for (let i = 0; i < 44; i++) {
+    const y = lerp(632, 1070, Math.pow(r(), .8)), s = pxm(y) / 200;
+    const x = range(r, -80, W), len = range(r, 60, 260) * (.5 + s);
+    if (y > 960 && x + len > 1560) continue;
+    const pts = [];
+    for (let j = 0; j <= 16; j++) pts.push([x + len * j / 16, y + Math.sin(j / 16 * Math.PI) * -6 * s + Math.sin(j * .7 + i) * 1.2]);
+    gouge(k, pts, range(r, .8, 2.6) * (.6 + s * .6), 'ink', 'v');
+    if (r() < .5) gouge(k, pts.slice(3, 13).map(([px, py]) => [px + 6, py + 5 * s + 3]), range(r, .6, 1.4) * (.6 + s * .5), 'ink', 'v');
+  }
+  // chatter: where the gouge skipped, stray ridges print faintly
+  for (let i = 0; i < 26; i++) {
+    const x = range(r, 0, W), y = range(r, 660, 1070), n = 3 + (r() * 4 | 0), a = range(r, -.3, .3), l = range(r, 14, 40);
+    k.globalAlpha = range(r, .35, .7);
+    for (let j = 0; j < n; j++) gouge(k, line([x + j * 5, y + j * 2], [x + j * 5 + Math.cos(a) * l, y + j * 2 + Math.sin(a) * l], 4), range(r, .5, 1.1), 'ink', 'v');
+    k.globalAlpha = 1;
+  }
+}
+function lightSpill(k, rp) {
+  const [dx0, , dx1, dy1] = DOOR;
+  const spill = [[dx0 + 2, dy1 + 4], [dx1 - 2, dy1 + 4], [dx1 + 70, 800], [dx0 - 86, 800]];
+  mode(rp, 'ink'); fillPts(rp, spill);
+  // fade the light out with cuts that thicken away from the door
+  clipped(rp, spill, () => {
+    for (let y = dy1 + 14; y < 806; y += 9) {
+      const u = (y - dy1) / 120, w = .4 + u * 3.2;
+      gouge(rp, [[dx0 - 100, y], [dx1 + 100, y + 2]], w, 'cut', 'even');
+    }
+  });
+  // the father's shadow runs toward us through the light
+  shape(k, [[222, dy1 + 2], [232, dy1 + 2], [240, 760], [228, 792], [214, 762]], 'ink');
+}
+function footprints(k) {
+  const path = curve([[236, 700], [360, 742], [540, 792], [720, 850], [900, 905], [1040, 946]], false, 20);
+  const r = rngFor('prints');
+  let acc = 0, side = 1;
+  for (let i = 1; i < path.length; i++) {
+    const [ax, ay] = path[i - 1], [bx, by] = path[i], d = Math.hypot(bx - ax, by - ay);
+    acc += d;
+    const s = pxm(by), step = .42 * s;
+    if (acc < step) continue;
+    acc = 0; side = -side;
+    const ang = Math.atan2(by - ay, bx - ax), nx = -Math.sin(ang), ny = Math.cos(ang);
+    const x = bx + nx * side * .09 * s, y = by + ny * side * .06 * s;
+    const fo = .3 + .7 * (by - HZ) / (H - HZ);
+    const rot = ang * .35 + range(r, -.08, .08), hl = .1 * s, hw = .042 * s * fo + 1;
+    shape(k, ellipsePts(x, y, hl, hw, 18, rot), 'ink');
+    shape(k, ellipsePts(x + Math.sin(rot) * hw * .5, y + Math.cos(rot) * hw * .55, hl * .92, hw * .8, 18, rot), 'cut');
+  }
+}
+
+/* ── the snowman ──────────────────────────────────────────────────────────── */
+const SNOW = { x: 1290, base: 932 };
+const BALLS = [[1290, 808, 124], [1292, 622, 89], [1288, 488, 62]];
+function ball(x, y, rad, key) {
+  const n = makeNoise('ball:' + key);
+  return Array.from({ length: 72 }, (_, i) => { const a = i / 72 * TAU, rr = rad * (1 + .03 * n(Math.cos(a) * 2, Math.sin(a) * 2)); return [x + Math.cos(a) * rr, y + Math.sin(a) * rr * .98]; });
+}
+function snowman(k, rp) {
+  const r = rngFor('snowman');
+  // cast shadow to the lower left, away from the moon
+  const sh = ellipsePts(1170, 944, 176, 22, 40, -.03);
+  shape(k, sh, 'ink');
+  for (let j = 0; j < 4; j++) gouge(k, line([1030 + j * 30, 936 + j * 5], [1250 - j * 26, 939 + j * 5], 10), 1.2, 'cut', 'v');
+  // the stick arm on the far side, behind the body
+  const arm = curve([[1372, 606], [1422, 566], [1452, 520], [1470, 476]], false, 6);
+  const twigs = [[[1440, 540], [1476, 530]], [[1462, 494], [1490, 470]], [[1470, 476], [1466, 446]], [[1452, 520], [1432, 498]]];
+  gouge(k, arm, 9, 'cut', 'u'); twigs.forEach(t => gouge(k, line(...t, 6), 6, 'cut', 'u'));
+  gouge(k, arm, 4.2, 'ink', 'in'); twigs.forEach(t => gouge(k, line(...t, 6), 2.2, 'ink', 'in'));
+  BALLS.forEach(([x, y, rad], i) => {
+    const o = ball(x, y, rad, i);
+    shape(k, grow(o, 2), 'cut');
+    // outline: heavy on the shadow side, thin and broken where the moon hits
+    const rr = rngFor('ballline' + i);
+    let a = -1.2;
+    while (a < 5.1) {
+      const len = range(rr, .5, 1.3), pts = [];
+      for (let s = 0; s <= 20; s++) { const t = a + len * s / 20, idx = Math.round(mod(t, TAU) / TAU * 72) % 72; pts.push(o[idx]); }
+      const mid = a + len / 2, shade = .5 - .5 * Math.cos(mid - Math.PI * .95);
+      gouge(k, pts, .8 + 3.6 * shade * shade, 'ink', 'v');
+      a += len + range(rr, .02, .12) * (1 - shade);
+    }
+    // crescent hatching following the ball, on the shadow side
+    for (let j = 1; j <= 6; j++) {
+      const rj = rad * (1 - j * .085), a0 = Math.PI * (.55 + j * .045), a1 = Math.PI * (1.45 - j * .06);
+      let t = a0 + range(rr, 0, .15);
+      while (t < a1) {
+        const len = range(rr, .18, .45), pts = [];
+        for (let s = 0; s <= 10; s++) { const q = t + len * s / 10; pts.push([x + Math.cos(q) * rj, y + Math.sin(q) * rj * .98]); }
+        gouge(k, pts, (2.6 - j * .3) * range(rr, .7, 1.1), 'ink', 'v');
+        t += len + range(rr, .08, .25);
+      }
+    }
+  });
+  // creases where the balls sit on each other
+  gouge(k, curve([[1212, 690], [1250, 704], [1292, 708], [1336, 703], [1372, 688]], false, 8), 4, 'ink', 'v');
+  gouge(k, curve([[1236, 540], [1262, 550], [1290, 552], [1318, 548], [1340, 538]], false, 8), 3.2, 'ink', 'v');
+  // rolled layers on the bottom ball
+  for (let j = 0; j < 3; j++) gouge(k, curve([[1200, 770 + j * 30], [1250, 790 + j * 34], [1320, 796 + j * 34], [1392, 776 + j * 30]], false, 8), 1.1, 'ink', 'v');
+  // coal face: eyes, smile; buttons
+  for (const [x, y] of [[1270, 478], [1303, 475]]) { shape(k, ellipsePts(x, y, 6.5, 7.8, 14, .2), 'ink'); disc(k, x + 2, y - 2.5, 1.7, 'cut'); }
+  for (let i = 0; i < 6; i++) { const a = Math.PI * (.2 + i * .12); disc(k, 1286 + Math.cos(a) * 25, 494 + Math.sin(a) * 18, 3.6 - Math.abs(i - 2.5) * .25, 'ink'); }
+  for (const y of [586, 620, 656]) { disc(k, 1287, y, 7, 'ink'); disc(k, 1289, y - 2, 1.8, 'cut'); }
+  // dad's old hat, a little tilted, with a red band
+  const hat = (pts) => pts.map(([x, y]) => { const a = -.12, cx = 1290, cy = 432, dx = x - cx, dy = y - cy; return [cx + dx * Math.cos(a) - dy * Math.sin(a), cy + dx * Math.sin(a) + dy * Math.cos(a)]; });
+  shape(k, hat(ellipsePts(1290, 434, 66, 11, 30)), 'ink');
+  shape(k, hat([[1256, 434], [1259, 366], [1263, 360], [1317, 358], [1321, 364], [1324, 434]]), 'ink');
+  const band = hat([[1257, 424], [1323, 424], [1323, 408], [1258, 408]]);
+  shape(k, band, 'cut'); mode(rp, 'ink'); fillPts(rp, band);
+  shape(k, hat([[1260, 362], [1272, 352], [1290, 349], [1306, 353], [1319, 360], [1316, 366], [1262, 366]]), 'cut');
+  for (let j = 0; j < 4; j++) gouge(k, hat(line([1300 + j * 5, 370], [1302 + j * 5, 402], 6)), 1.2, 'cut', 'v');
+}
+
+/* ── the crate and the boy ────────────────────────────────────────────────── */
+function crate(k) {
+  const x0 = 1058, x1 = 1196, top = 858, base = 946;
+  shape(k, grow([[x0 - 2, top - 10], [x1 + 8, top - 12], [x1 + 8, base + 2], [x0 - 2, base + 2]], 5), 'cut');
+  shape(k, [[x0, top], [x1, top], [x1, base], [x0, base]], 'ink');
+  shape(k, [[x0, top], [x0 + 12, top - 11], [x1 + 8, top - 11], [x1, top]], 'ink');
+  for (const y of [884, 914]) gouge(k, [[x0 + 12, y], [x1 - 12, y + 1]], 2.6, 'cut', 'even');
+  for (const x of [x0 + 9, x1 - 9]) gouge(k, [[x, top + 6], [x, base - 6]], 1, 'cut', 'v');
+  for (let x = x0 + 22; x < x1 - 10; x += 26) gouge(k, [[x, top - 2], [x + 12, top - 9]], 1, 'cut', 'v');
+  for (const [x, y] of [[x0 + 9, top + 12], [x1 - 9, top + 12], [x0 + 9, base - 12], [x1 - 9, base - 12]]) disc(k, x, y, 2, 'cut');
+  shape(k, [[1068, 950], [1250, 947], [1262, 957], [1060, 960]], 'ink');
+}
+function boy(k, rp) {
+  // 1.15 m at this depth; feet on the crate, on tiptoe, leaning in to the snowman
+  const head = [1170, 522], tilt = -.3;
+  const H2 = (u, v) => [head[0] + u * Math.cos(tilt) - v * Math.sin(tilt), head[1] + u * Math.sin(tilt) + v * Math.cos(tilt)];
+  const legs = [
+    [[1114, 694], [1106, 772], [1100, 836]],
+    [[1146, 694], [1153, 772], [1158, 838]],
+  ];
+  const boot = ([ax, ay]) => curve([[ax - 15, ay - 12], [ax + 12, ay - 12], [ax + 30, ay + 4], [ax + 28, ay + 15], [ax - 4, ay + 15], [ax - 17, ay + 4]], true, 5);
+  const torso = curve([[1110, 578], [1150, 564], [1186, 580], [1196, 636], [1188, 700], [1146, 712], [1098, 706], [1088, 652], [1094, 604]], true, 6);
+  const farArm = [[1122, 588], [1090, 624], [1058, 646]];
+  const nearArm = [[1166, 584], [1204, 552], [1232, 506]];
+  const face = curve([H2(-6, -30), H2(12, -29), H2(22, -17), H2(25, -8), H2(26, -2), H2(32, 5), H2(26, 9), H2(27, 13), H2(24, 16), H2(26, 19), H2(22, 26), H2(10, 30), H2(0, 30), H2(-13, 33), H2(-24, 22), H2(-28, 4), H2(-22, -18)], true, 5);
+  // one white halo cut around the whole figure, the carver's separation line
+  mode(k, 'cut'); k.lineWidth = 12; k.lineJoin = 'round';
+  for (const pts of [face, torso, ...legs.map(l => curve(l, false, 6)), curve(farArm, false, 6), curve(nearArm, false, 6)]) {
+    k.beginPath(); trace(k, pts, pts === face || pts === torso); k.stroke(); if (pts === face || pts === torso) k.fill();
+  }
+  k.lineWidth = 42; for (const l of legs) { k.beginPath(); trace(k, l, false); k.stroke(); }
+  for (const l of legs) shape(k, grow(boot(l[2]), 5), 'cut');
+  k.lineWidth = 30; for (const a of [farArm, nearArm]) { k.beginPath(); trace(k, a, false); k.stroke(); }
+  // far arm out for balance
+  shape(k, limb(farArm, 13, 11), 'ink');
+  shape(k, ellipsePts(1052, 650, 13, 11, 16, .6), 'ink');
+  // legs and boots, heels lifted
+  legs.forEach((l, i) => {
+    if (i === 1) { mode(k, 'cut'); k.lineWidth = 6; k.beginPath(); trace(k, taper(curve(l, false, 8), () => 17.5), true); k.stroke(); }
+    shape(k, limb(l, 16.5, 14), 'ink');
+    const [ax, ay] = l[2];
+    if (i === 1) shape(k, grow(boot(l[2]), 3), 'cut');
+    shape(k, boot(l[2]), 'ink');
+    gouge(k, [[ax - 11, ay + 9], [ax + 25, ay + 10]], 1.5, 'cut', 'v');
+    gouge(k, [[ax - 14, ay - 8], [ax + 10, ay - 9]], 1.3, 'cut', 'v');
+    gouge(k, line([l[1][0] - 6, l[1][1] - 20], [l[1][0] - 3, l[1][1] + 22], 6), 1.1, 'cut', 'v');
+  });
+  // the puffy coat, quilted with cuts
+  shape(k, torso, 'ink');
+  clipped(k, torso, () => {
+    for (let j = 0; j < 6; j++) {
+      const y = 598 + j * 21;
+      gouge(k, curve([[1086, y - 4], [1140, y + 5], [1192, y - 6]], false, 10), 2.2, 'cut', 'v');
+    }
+    gouge(k, curve([[1160, 572], [1164, 640], [1158, 712]], false, 8), 1.6, 'cut', 'v');
+  });
+  // the near arm reaching up with the carrot
+  shape(k, limb(nearArm, 13.5, 11), 'ink');
+  for (let j = 1; j < 4; j++) { const p = curve(nearArm, false, 8)[j * 4]; gouge(k, [[p[0] - 9, p[1] - 5], [p[0] + 7, p[1] + 9]], 1.5, 'cut', 'v'); }
+  const carrot = [[1238, 492], [1244, 506], [1283, 489]];
+  shape(k, grow(carrot, 3), 'cut'); mode(rp, 'ink'); fillPts(rp, carrot);
+  mode(k, 'ink'); k.lineWidth = 2; k.beginPath(); trace(k, carrot); k.stroke();
+  for (const t of [.35, .55, .75]) { const x = lerp(1241, 1283, t), y = lerp(499, 489, t); gouge(k, [[x, y - 5 + t * 3], [x + 1, y + 4 - t * 2]], 1, 'ink', 'v'); }
+  gouge(k, [[1240, 494], [1230, 482]], 1.6, 'ink', 'in'); gouge(k, [[1240, 494], [1236, 478]], 1.4, 'ink', 'in');
+  shape(k, ellipsePts(1236, 506, 14, 12, 16, -.8), 'ink');
+  gouge(k, [[1224, 516], [1236, 522]], 1.4, 'cut', 'v');
+  // the face, paper white with a cut keyline
+  shape(k, face, 'cut');
+  mode(k, 'ink'); k.lineWidth = 3.2; k.lineJoin = 'round'; k.beginPath(); trace(k, face); k.stroke();
+  // hair tufts under the hat, ear, eye looking up at the snowman, open mouth
+  for (let j = 0; j < 5; j++) gouge(k, [H2(-24 + j * 3, 4 + j * 2), H2(-30 + j * 2, 18 + j * 3)], 2.2, 'ink', 'in');
+  gouge(k, curve([H2(-4, 2), H2(-9, 6), H2(-7, 13), H2(-2, 14)], false, 5), 2, 'ink', 'v');
+  shape(k, curve([H2(11, -6), H2(16, -9), H2(19, -5), H2(15, -2)], true, 4), 'ink');
+  gouge(k, [H2(10, -13), H2(19, -15)], 1.4, 'ink', 'v');
+  shape(k, ellipsePts(...H2(23, 14), 2.6, 1.8, 10, tilt), 'ink');
+  disc(rp, ...H2(9, 9), 7.5, 'ink');
+  // red bobble hat, pushed back, with its folded rib band
+  const hatPts = curve([H2(-31, 2), H2(-33, -18), H2(-24, -38), H2(-4, -46), H2(14, -40), H2(24, -24), H2(25, -14), H2(20, -12), H2(-2, -9), H2(-28, 6)], true, 5);
+  mode(rp, 'ink'); fillPts(rp, hatPts); shape(k, grow(hatPts, 2), 'cut');
+  mode(k, 'ink'); k.lineWidth = 2.4; k.beginPath(); trace(k, hatPts); k.stroke();
+  const bandPts = [H2(-31, 2), H2(-30, -10), H2(-4, -22), H2(24, -24), H2(25, -14), H2(20, -12), H2(-2, -9), H2(-28, 6)];
+  for (let j = 0; j < 9; j++) { const t = j / 8; const a = [lerp(bandPts[1][0], bandPts[3][0], t), lerp(bandPts[1][1], bandPts[3][1], t)], b = [lerp(bandPts[7][0], bandPts[5][0], t), lerp(bandPts[7][1], bandPts[5][1], t)]; gouge(rp, line(a, b, 4), 1.4, 'cut', 'v'); }
+  gouge(k, curve([H2(-30, -10), H2(-4, -22), H2(24, -24)], false, 6), 1.8, 'ink', 'v');
+  const pom = H2(-26, -44);
+  disc(rp, pom[0], pom[1], 14, 'ink');
+  const pr = rngFor('pom');
+  for (let j = 0; j < 12; j++) { const a = pr() * TAU, d = pr() * 11; disc(rp, pom[0] + Math.cos(a) * d, pom[1] + Math.sin(a) * d, 1.5, 'cut'); }
+  mode(k, 'ink'); k.lineWidth = 2; k.beginPath(); k.arc(pom[0], pom[1], 14.5, 0, TAU); k.stroke();
+  // the scarf: round the neck, one end down the chest, one streaming behind
+  const wrap = curve([[1128, 560], [1156, 552], [1188, 560], [1190, 578], [1160, 574], [1128, 580]], true, 5);
+  const tail = taper(curve([[1136, 566], [1100, 552], [1066, 560], [1034, 548], [1004, 556]], false, 8), s => 10 - s * 2);
+  const front = taper(curve([[1176, 574], [1180, 604], [1177, 636]], false, 8), s => 10 - s * 1.2);
+  for (const p of [wrap, tail, front]) { shape(k, grow(p, 2.5), 'cut'); mode(rp, 'ink'); fillPts(rp, p); mode(k, 'ink'); k.lineWidth = 2.2; k.beginPath(); trace(k, p); k.stroke(); }
+  const tc = curve([[1136, 566], [1100, 552], [1066, 560], [1034, 548], [1004, 556]], false, 8);
+  for (let j = 2; j < tc.length - 3; j += 3) { const [x, y] = tc[j]; gouge(rp, [[x - 1, y - 8], [x + 1, y + 8]], 1.1, 'cut', 'u'); }
+  for (let j = 0; j < 5; j++) gouge(k, [[1002 - j * 1.5, 548 + j * 4], [990 - j * 2, 546 + j * 5]], 1.4, 'ink', 'in');
+  for (let j = 0; j < 4; j++) gouge(k, [[1172 + j * 3, 637], [1171 + j * 3.5, 650]], 1.4, 'ink', 'in');
+}
+
+/* ── lettering, snowfall ──────────────────────────────────────────────────── */
+function title(k) {
+  const L = lettering('SNOWMAN', 92, 112, 74, { align: 'left', weight: 1.7, track: 2.8, wob: .3, key: 'snowman-title' });
+  for (const st of L.strokes) gouge(k, resample(st, 3), 6.2, 'cut', 'u');
+  const Y = lettering('1994', 1850, 1026, 38, { align: 'right', weight: 1.4, track: 2.4, key: 'snowman-year' });
+  for (const st of Y.strokes) gouge(k, resample(st, 2), 3.2, 'ink', 'u');
+}
+function flakes(k, rp) {
+  const r = rngFor('flakes');
+  for (let i = 0; i < 520; i++) {
+    const x = r() * W, y = r() * H, near = r() < .06, rad = near ? range(r, 5, 8) : range(r, 1.3, 4.2);
+    const pts = ellipsePts(x, y, rad * 1.15, rad, 8, .6).map(([px, py]) => [px + range(r, -.5, .5), py + range(r, -.5, .5)]);
+    shape(k, pts, 'cut'); shape(rp, pts, 'cut');
+  }
+}
+
+/* ── printing ─────────────────────────────────────────────────────────────── */
+function inkTexture(P, key, strength) {
+  const c = ctxOf(P), im = c.getImageData(0, 0, W, H), d = im.data;
+  const nF = makeNoise(key + ':tooth'), nR = makeNoise(key + ':roller'), nM = makeNoise(key + ':mottle');
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4 + 3, a = d[i];
+    if (!a) continue;
+    const tooth = nF(x * .42, y * .42) + .5 * nF(x * 1.1 + 40, y * 1.1);
+    const roll = fbm(nR, x / 340, y / 46, 3);
+    const mot = nM(x / 14, y / 14);
+    const miss = smooth(.78, 1.05, tooth * .75 + roll * .6 * strength + .04);
+    d[i] = a * (1 - miss) * (.955 + .045 * mot);
+  }
+  c.putImageData(im, 0, 0);
+}
+function paper(g) {
+  g.fillStyle = css(PAPER); g.fillRect(0, 0, W, H);
+  const im = g.getImageData(0, 0, W, H), d = im.data, n1 = makeNoise('paper:fine'), n2 = makeNoise('paper:cloud');
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = (y * W + x) * 4, v = .55 * n1(x / 2.5, y / 2.5) + .45 * fbm(n2, x / 180, y / 180, 3), f = 1 + .045 * v;
+    d[i] *= f; d[i + 1] *= f; d[i + 2] *= f * .995;
+  }
+  g.putImageData(im, 0, 0);
+  const r = rngFor('paper:fibres');
+  g.lineWidth = .7;
+  for (let i = 0; i < 1400; i++) {
+    const x = r() * W, y = r() * H, a = r() * TAU, l = range(r, 4, 14);
+    g.strokeStyle = `rgba(110,90,60,${range(r, .04, .1)})`;
+    g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a) * l * .5 + range(r, -2, 2), y + Math.sin(a) * l * .5 + range(r, -2, 2), x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+  }
+}
+function print(g, plate, col, dx, dy) {
+  const L = cv(W, H), l = ctxOf(L);
+  l.fillStyle = css(col); l.fillRect(0, 0, W, H);
+  l.globalCompositeOperation = 'destination-in'; l.drawImage(plate, 0, 0);
+  g.save(); g.globalCompositeOperation = 'multiply'; g.drawImage(L, dx, dy); g.restore();
+}
+
+function draw(g) {
+  const K = cv(W, H), k = ctxOf(K), Rp = cv(W, H), rp = ctxOf(Rp);
+  sky(k);
+  mountains(k);
+  forestBand(k, rp);
+  ground(k);
+  deodar(k, 742, 668, 452, 'a');
+  deodar(k, 884, 644, 262, 'b');
+  house(k, rp);
+  fence(k);
+  footprints(k);
+  lightSpill(k, rp);
+  snowman(k, rp);
+  crate(k);
+  boy(k, rp);
+  title(k);
+  flakes(k, rp);
+  inkTexture(K, 'black', 1);
+  inkTexture(Rp, 'red', 1.2);
+  paper(g);
+  print(g, Rp, RED, 3, -2);
+  print(g, K, BLACK, 0, 0);
+}
+stillFrame(W, H, draw);
+</script>

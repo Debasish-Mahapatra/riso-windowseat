@@ -1,0 +1,1388 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>The Scarf · style frame</title>
+<style>html,body{margin:0;background:#222} canvas{display:block;width:1280px;height:720px}</style>
+</head><body><canvas id="c"></canvas>
+<script src="kit.js"></script>
+<script>
+'use strict';
+/* ═══ THE SCARF · style frame ══════════════════════════════════════════════════
+   A felt-and-yarn diorama photographed flat: felt cut-outs with fibre texture,
+   embroidery (running, back, blanket, cross stitch, French knots), yarn hair
+   and a stockinette scarf whose 76 rows are the warming stripes, 1950–2025. */
+
+/* ── 1. Data ──────────────────────────────────────────────────────────────────
+   APPROXIMATE annual global-mean temperature anomalies (°C, relative to
+   1951–1980), GISTEMP-like, typed FROM MEMORY for this pitch frame only.
+   They are NOT the dataset: replace them with the real NASA GISTEMP v4 annual
+   means before the film is made. One knitted row per year. */
+const YEAR0 = 1950;
+const ANOM = [
+  -0.17, -0.07, 0.01, 0.08, -0.13, -0.14, -0.19, 0.05, 0.06, 0.03,   // 1950s
+  -0.03, 0.06, 0.03, 0.05, -0.20, -0.11, -0.06, -0.02, -0.08, 0.05,  // 1960s
+  0.03, -0.08, 0.01, 0.16, -0.07, -0.01, -0.10, 0.18, 0.07, 0.16,    // 1970s
+  0.26, 0.32, 0.14, 0.31, 0.16, 0.12, 0.18, 0.32, 0.39, 0.27,        // 1980s
+  0.45, 0.40, 0.22, 0.23, 0.31, 0.45, 0.33, 0.46, 0.61, 0.38,        // 1990s
+  0.39, 0.54, 0.63, 0.62, 0.53, 0.68, 0.64, 0.66, 0.54, 0.65,        // 2000s
+  0.72, 0.61, 0.65, 0.68, 0.75, 0.90, 1.01, 0.92, 0.85, 0.98,        // 2010s
+  1.01, 0.85, 0.89, 1.17, 1.28, 1.19,                                // 2020–2025
+];
+/* Warming-stripes convention (Ed Hawkins): subtract the 1971–2000 mean
+   (≈ 0.234 for the values above), map onto 16 steps over −0.75…+0.75 °C,
+   clamped. 8 blues dark→light, then 8 reds light→dark. */
+const BASELINE = ANOM.slice(1971 - YEAR0, 2001 - YEAR0).reduce((s, a) => s + a, 0) / 30;
+const STRIPE_HEX = ['#08306b', '#08519c', '#2171b5', '#4292c6', '#6baed6', '#9ecae1', '#c6dbef', '#deebf7',
+  '#fee0d2', '#fcbba1', '#fc9272', '#fb6a4a', '#ef3b2c', '#cb181d', '#a50f15', '#67000d'];
+const STRIPE_RGB = STRIPE_HEX.map(rgb);
+const ROW_CI = ANOM.map(a => clamp(Math.floor((a - BASELINE + 0.75) / 1.5 * 16), 0, 15));
+const NROWS = ANOM.length; // 76
+
+/* ── 2. Geometry helpers ──────────────────────────────────────────────────── */
+const vadd = (a, b) => [a[0] + b[0], a[1] + b[1]];
+const vsub = (a, b) => [a[0] - b[0], a[1] - b[1]];
+const vmul = (a, s) => [a[0] * s, a[1] * s];
+const vlen = a => Math.hypot(a[0], a[1]);
+const vnorm = a => { const l = Math.hypot(a[0], a[1]) || 1; return [a[0] / l, a[1] / l]; };
+const vlerp = (a, b, u) => [a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u];
+const blob = (ctrl, per = 8) => curve(ctrl, true, per);
+const open = (ctrl, per = 8) => curve(ctrl, false, per);
+function rotPts(pts, cx, cy, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return pts.map(([x, y]) => [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c]);
+}
+const rotP = (p, cx, cy, a) => rotPts([p], cx, cy, a)[0];
+function rrect(x, y, w, h, r) {
+  const q = [];
+  const arc = (cx, cy, a0) => { for (let i = 0; i <= 6; i++) { const a = a0 + i / 6 * Math.PI / 2; q.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]); } };
+  arc(x + w - r, y + r, -Math.PI / 2); arc(x + w - r, y + h - r, 0); arc(x + r, y + h - r, Math.PI / 2); arc(x + r, y + r, Math.PI);
+  return q;
+}
+function pathOf(pts, closed = true) {
+  const p = new Path2D(); p.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i][0], pts[i][1]);
+  if (closed) p.closePath();
+  return p;
+}
+function bboxOf(pts) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const [x, y] of pts) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+  return [x0, y0, x1, y1];
+}
+function areaOf(pts) { let s = 0; for (let i = 0; i < pts.length; i++) { const a = pts[i], b = pts[(i + 1) % pts.length]; s += a[0] * b[1] - b[0] * a[1]; } return s / 2; }
+function polyLen(pts) { let s = 0; for (let i = 1; i < pts.length; i++) s += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); return s; }
+/** Point at arc fraction u along an open polyline. */
+function along(pts, u) {
+  const L = polyLen(pts) * clamp(u); let s = 0;
+  for (let i = 1; i < pts.length; i++) {
+    const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    if (s + d >= L) return vlerp(pts[i - 1], pts[i], d ? (L - s) / d : 0);
+    s += d;
+  }
+  return pts[pts.length - 1].slice();
+}
+const dark = (c, u) => mixc(c, [18, 8, 4], u);
+const light = (c, u) => mixc(c, [255, 250, 240], u);
+const col3 = c => Array.isArray(c) ? c : rgb(c);
+
+/* ── 3. Felt textures (built once, tiled) ─────────────────────────────────── */
+const TEXN = 1024;
+let TEX = null;
+function buildTextures() {
+  const N = TEXN, r = rngFor('tex:fibres');
+  // Fibres: short curved hairs, light and dark, wrapped so the tile repeats.
+  const fib = cv(N, N), g = ctxOf(fib);
+  g.lineCap = 'round';
+  const batches = [['255,250,240', .5, .85, 15000], ['255,250,240', .28, .6, 20000],
+    ['20,10,5', .42, .85, 15000], ['20,10,5', .24, .6, 20000], ['255,250,240', .65, 1.1, 2500]];
+  for (const [c, a, w, n] of batches) {
+    g.strokeStyle = `rgba(${c},${a})`; g.lineWidth = w; g.beginPath();
+    for (let i = 0; i < n; i++) {
+      const x = r() * N, y = r() * N, an = r() * TAU, len = 2.5 + r() * r() * (w > 1 ? 16 : 10), bend = (r() - .5) * 1.1;
+      const dx = Math.cos(an) * len / 2, dy = Math.sin(an) * len / 2, mx = -dy * bend, my = dx * bend;
+      for (const ox of [0, -N, N]) for (const oy of [0, -N, N]) {
+        const X = x + ox, Y = y + oy;
+        if (X + len < 0 || X - len > N || Y + len < 0 || Y - len > N) continue;
+        g.moveTo(X - dx, Y - dy); g.quadraticCurveTo(X + mx, Y + my, X + dx, Y + dy);
+      }
+    }
+    g.stroke();
+  }
+  // Mottle: tileable low-frequency density variation (felt is never even).
+  const M = 128, nz = makeNoise('tex:mottle'), F = 7;
+  const small = cv(M * 3, M * 3), sg = ctxOf(small), id = sg.createImageData(M, M);
+  const tn = (x, y, P) => { const u = x / P, v = y / P; return nz(x, y) * (1 - u) * (1 - v) + nz(x - P, y) * u * (1 - v) + nz(x, y - P) * (1 - u) * v + nz(x - P, y - P) * u * v; };
+  for (let y = 0; y < M; y++) for (let x = 0; x < M; x++) {
+    const X = x / M * F, Y = y / M * F;
+    const v = tn(X, Y, F) * .65 + tn(X * 2 % (F * 2), Y * 2 % (F * 2), F * 2) * .35;
+    const k = (y * M + x) * 4, a = Math.min(1, Math.abs(v) * 1.6);
+    const c = v > 0 ? 255 : 0; id.data[k] = c; id.data[k + 1] = c * .97; id.data[k + 2] = c * .92; id.data[k + 3] = a * 255;
+  }
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) sg.putImageData(id, i * M, j * M);
+  const mot = cv(N, N), mg = ctxOf(mot);
+  mg.imageSmoothingEnabled = true; mg.imageSmoothingQuality = 'high';
+  mg.drawImage(small, M - 1, M - 1, M + 2, M + 2, -N / M, -N / M, N + 2 * N / M, N + 2 * N / M);
+  // Grain: per-pixel photographic noise.
+  const G = 256, grain = cv(G, G), gg = ctxOf(grain), gd = gg.createImageData(G, G), rg = rngFor('tex:grain');
+  for (let i = 0; i < G * G; i++) { const v = rg(); const c = v > .5 ? 255 : 0; gd.data[i * 4] = gd.data[i * 4 + 1] = gd.data[i * 4 + 2] = c; gd.data[i * 4 + 3] = Math.abs(v - .5) * 2 * 60; }
+  gg.putImageData(gd, 0, 0);
+  TEX = { fib, mot, grain };
+}
+const PATS = new WeakMap();
+function pats(g) {
+  let p = PATS.get(g);
+  if (!p) { p = { fib: g.createPattern(TEX.fib, 'repeat'), mot: g.createPattern(TEX.mot, 'repeat'), grain: g.createPattern(TEX.grain, 'repeat') }; PATS.set(g, p); }
+  return p;
+}
+/** Fill the clip region with tiled texture at a seeded offset. */
+function texFill(g, which, bb, alpha, key, op) {
+  const r = rngFor('tex:' + key), ox = Math.floor(r() * TEXN), oy = Math.floor(r() * TEXN);
+  g.save(); g.globalAlpha = alpha; if (op) g.globalCompositeOperation = op; g.translate(ox, oy); g.fillStyle = pats(g)[which];
+  g.fillRect(bb[0] - ox - 4, bb[1] - oy - 4, bb[2] - bb[0] + 8, bb[3] - bb[1] + 8);
+  g.restore();
+}
+
+/* ── 4. Felt ──────────────────────────────────────────────────────────────── */
+/** A scissor-cut outline: evenly resampled, gently irregular. */
+function cutEdge(pts, key, amp = 1.3) {
+  const R = resample(pts, 3.5, true), w = wobble(R, amp, key, .045), r = rngFor('cut:' + key);
+  return w.map(([x, y]) => [x + (r() - .5) * .5, y + (r() - .5) * .5]);
+}
+function dropShadow(g, path, dx = 3, dy = 5, blur = 5, a = .32) {
+  g.save(); g.filter = `blur(${blur}px)`; g.fillStyle = `rgba(40,22,10,${a})`; g.translate(dx, dy); g.fill(path); g.restore();
+}
+/** Stray fibres escaping a felt edge. */
+function strayFibres(g, P, base, key, dens = 1) {
+  const r = rngFor('stray:' + key), n = P.length, sgn = areaOf(P) > 0 ? 1 : -1;
+  const per = Math.round(polyLen(P) / 26 * dens);
+  g.save(); g.lineCap = 'round';
+  for (let i = 0; i < per; i++) {
+    const k = Math.floor(r() * n), p = P[k], q = P[(k + 1) % n];
+    const t = vnorm(vsub(q, p)), out = [t[1] * sgn, -t[0] * sgn];
+    const L = 3 + r() * r() * 11, s = (r() - .5) * 1.4;
+    const a = vadd(p, vmul(out, -1.5)), e = vadd(vadd(p, vmul(out, L * .8)), vmul(t, L * s));
+    const m = vadd(vlerp(a, e, .5), vmul(t, (r() - .5) * 4));
+    g.strokeStyle = css(r() < .5 ? light(base, .18) : dark(base, .12), .75); g.lineWidth = .55 + r() * .4;
+    g.beginPath(); g.moveTo(a[0], a[1]); g.quadraticCurveTo(m[0], m[1], e[0], e[1]); g.stroke();
+  }
+  g.restore();
+}
+/** A felt cut-out: drop shadow, colour, mottle, fibres, puffy edges, strays.
+ *  o: shadow/sx/sy/sb/sa, wob, raw, fib, mot, ew/eb/ea (edge shading), hl,
+ *     inner(g, bb) for printed/dyed detail drawn under the fibres, stray. */
+function felt(g, pts, color, key, o = {}) {
+  const base = col3(color), P = o.raw ? pts : cutEdge(pts, key, o.wob ?? 1.3), path = pathOf(P), bb = bboxOf(P);
+  if (o.shadow !== false) dropShadow(g, path, o.sx ?? 3, o.sy ?? 5, o.sb ?? 5, o.sa ?? .32);
+  g.save();
+  g.fillStyle = css(base); g.fill(path); g.clip(path);
+  if (o.inner) o.inner(g, bb, base);
+  texFill(g, 'mot', bb, o.mot ?? .22, 'm' + key);
+  texFill(g, 'fib', bb, o.fib ?? 1, 'f' + key, 'soft-light');
+  texFill(g, 'fib', bb, (o.fib ?? 1) * .16, 'f' + key);
+  if (o.hl !== 0) {
+    const w = bb[2] - bb[0], h = bb[3] - bb[1], R = Math.max(w, h) * .75;
+    const gr = g.createRadialGradient(bb[0] + w * .32, bb[1] + h * .28, 0, bb[0] + w * .32, bb[1] + h * .28, R);
+    gr.addColorStop(0, `rgba(255,248,230,${o.hl ?? .12})`); gr.addColorStop(1, 'rgba(255,248,230,0)');
+    g.fillStyle = gr; g.fillRect(bb[0], bb[1], w, h);
+  }
+  g.filter = `blur(${o.eb ?? 5}px)`;
+  g.strokeStyle = css(dark(base, .55), o.ea ?? .5); g.lineWidth = o.ew ?? 9; g.stroke(path);
+  g.restore();
+  if (o.stray !== 0) strayFibres(g, P, base, key, o.stray ?? 1);
+  return { P, path, bb, base };
+}
+
+/* ── 5. Embroidery ────────────────────────────────────────────────────────── */
+/** One stitch of twisted floss from a to b. */
+function stitch(g, a, b, color, w = 1.6, o = {}) {
+  const c = col3(color), dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, tx = dx / L, ty = dy / L;
+  g.lineCap = 'round';
+  g.strokeStyle = `rgba(30,15,5,${o.sa ?? .38})`; g.lineWidth = w + .9;
+  g.beginPath(); g.moveTo(a[0] + .5, a[1] + .9); g.lineTo(b[0] + .5, b[1] + .9); g.stroke();
+  g.strokeStyle = css(dark(c, .12)); g.lineWidth = w;
+  g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+  const n = Math.max(1, Math.round(L / (w * 1.25))), h = w * .42;
+  g.strokeStyle = css(light(c, .5), .8); g.lineWidth = Math.max(.45, w * .34); g.beginPath();
+  for (let i = 0; i < n; i++) {
+    const u = (i + .5) / n, cx = a[0] + dx * u, cy = a[1] + dy * u;
+    g.moveTo(cx - tx * h * .7 + ty * h, cy - ty * h * .7 - tx * h); g.lineTo(cx + tx * h * .7 - ty * h, cy + ty * h * .7 + tx * h);
+  }
+  g.stroke();
+}
+/** Running stitch (len on, gap off) or backstitch (gap ≈ 0) along a polyline. */
+function running(g, pts, color, o = {}) {
+  const len = o.len ?? 7, gap = o.gap ?? 5, w = o.w ?? 1.6, R = resample(pts, 1, !!o.closed), r = rngFor('run:' + (o.key || '') + pts.length);
+  if (o.closed) R.push(R[0]);
+  let i = Math.round(o.phase ?? 0);
+  while (i < R.length - 2) {
+    const j = Math.min(R.length - 1, i + Math.max(2, Math.round(len + (r() - .5) * 1.4)));
+    stitch(g, R[i], R[j], color, w, o);
+    i = j + Math.max(0, Math.round(gap + (r() - .5) * 1.2));
+  }
+}
+const backstitch = (g, pts, color, o = {}) => running(g, pts, color, { len: 6, gap: 0.6, ...o });
+/** French knot: a tight bump of wrapped floss. */
+function knot(g, x, y, r, color, key = '') {
+  const c = col3(color), rr = rngFor('knot:' + key + x.toFixed(1) + y.toFixed(1));
+  g.save();
+  g.fillStyle = 'rgba(30,15,5,.45)'; g.beginPath(); g.arc(x + r * .3, y + r * .45, r * 1.1, 0, TAU); g.fill();
+  g.fillStyle = css(dark(c, .25)); g.beginPath(); g.arc(x, y, r, 0, TAU); g.fill();
+  g.lineCap = 'round'; g.lineWidth = r * .42;
+  for (let k = 0; k < 3; k++) {
+    const a0 = rr() * TAU; g.strokeStyle = css(k === 2 ? light(c, .15) : c);
+    g.beginPath(); g.ellipse(x, y, r * .72, r * .42, a0, 0, Math.PI * 1.25); g.stroke();
+  }
+  g.strokeStyle = css(light(c, .6), .85); g.lineWidth = r * .24;
+  g.beginPath(); g.arc(x - r * .1, y - r * .1, r * .55, Math.PI * 1.05, Math.PI * 1.6); g.stroke();
+  g.restore();
+}
+/** Blanket stitch around a closed outline (legs point inward). */
+function blanket(g, pts, color, o = {}) {
+  const sp = o.sp ?? 10, d = o.d ?? 7, w = o.w ?? 1.5, R = resample(pts, sp, true), n = R.length, sgn = areaOf(pts) > 0 ? 1 : -1;
+  for (let i = 0; i < n; i++) {
+    const p = R[i], q = R[(i + 1) % n], t = vnorm(vsub(q, p)), inn = [-t[1] * sgn, t[0] * sgn];
+    stitch(g, vadd(p, vmul(inn, -1)), vadd(p, vmul(inn, d)), color, w, o);
+    stitch(g, vadd(p, vmul(inn, -1)), vadd(q, vmul(inn, -1)), color, w, o);
+  }
+}
+/** One cross stitch centred at (x, y) in a cell of size s. */
+function xstitch(g, x, y, s, color, w) {
+  const h = s * .4; w = w ?? s * .3;
+  stitch(g, [x - h, y + h], [x + h, y - h], color, w, { sa: .3 });
+  stitch(g, [x - h, y - h], [x + h, y + h], color, w, { sa: .3 });
+}
+
+/* ── 6. Yarn ──────────────────────────────────────────────────────────────── */
+/** A soft yarn strand (hair): shadow, body, highlight. */
+function strand(g, pts, color, w, o = {}) {
+  const c = col3(color), P = pts.length > 2 ? open(pts, 6) : pts;
+  g.save(); g.lineCap = 'round'; g.lineJoin = 'round';
+  if (o.shadow !== false) {
+    g.strokeStyle = css(dark(c, .6), o.sa ?? .45); g.lineWidth = w + 1.3;
+    g.beginPath(); trace(g, P.map(([x, y]) => [x + .7, y + 1.1]), false); g.stroke();
+  }
+  g.strokeStyle = css(c); g.lineWidth = w; g.beginPath(); trace(g, P, false); g.stroke();
+  g.strokeStyle = css(light(c, o.hi ?? .38), .6); g.lineWidth = Math.max(.5, w * .32);
+  g.setLineDash([w * 1.1, w * .7]);
+  g.beginPath(); trace(g, P.map(([x, y]) => [x - w * .16, y - w * .2]), false); g.stroke();
+  g.restore();
+}
+/** Plied yarn (the working yarn, fringe): body with a twist and fuzz. */
+function plied(g, pts, color, w, key) {
+  const c = col3(color), P = resample(pts.length > 2 ? open(pts, 10) : pts, 1), r = rngFor('ply:' + key);
+  g.save(); g.lineCap = 'round'; g.lineJoin = 'round';
+  g.strokeStyle = 'rgba(30,12,6,.35)'; g.lineWidth = w + 1.5; g.beginPath(); trace(g, P.map(([x, y]) => [x + 1.2, y + 2]), false); g.stroke();
+  g.strokeStyle = css(c); g.lineWidth = w; g.beginPath(); trace(g, P, false); g.stroke();
+  const step = Math.max(2, w * .9);
+  for (let s = step / 2; s < P.length - 1; s += step) {
+    const i = Math.floor(s), a = P[Math.max(0, i - 1)], b = P[Math.min(P.length - 1, i + 1)], t = vnorm(vsub(b, a)), nn = [-t[1], t[0]], p = P[i], h = w * .5;
+    g.strokeStyle = css(dark(c, .45), .7); g.lineWidth = Math.max(.6, w * .22);
+    g.beginPath(); g.moveTo(p[0] + nn[0] * h - t[0] * h * .8, p[1] + nn[1] * h - t[1] * h * .8); g.lineTo(p[0] - nn[0] * h + t[0] * h * .8, p[1] - nn[1] * h + t[1] * h * .8); g.stroke();
+    g.strokeStyle = css(light(c, .35), .55); g.lineWidth = Math.max(.5, w * .2);
+    const q = vadd(p, vmul(t, step * .45));
+    g.beginPath(); g.moveTo(q[0] + nn[0] * h * .6 - t[0] * h * .5, q[1] + nn[1] * h * .6 - t[1] * h * .5); g.lineTo(q[0] - nn[0] * h * .2 + t[0] * h * .3, q[1] - nn[1] * h * .2 + t[1] * h * .3); g.stroke();
+  }
+  g.strokeStyle = css(light(c, .3), .45); g.lineWidth = .6;
+  for (let s = 0; s < P.length; s += 5) {
+    if (r() > .5) continue;
+    const p = P[Math.floor(s)], an = r() * TAU, L = 2 + r() * 5;
+    g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(p[0] + Math.cos(an) * (w * .5 + L), p[1] + Math.sin(an) * (w * .5 + L)); g.stroke();
+  }
+  g.restore();
+}
+
+/* ── 7. The knitted scarf ─────────────────────────────────────────────────────
+   The scarf is a ribbon: a centre path plus a half-width. at(u, v) maps arc
+   length u (px) and the across-coordinate v ∈ [−1, 1] (+1 = upper edge) into
+   the picture, so every stitch is placed and turned in the ribbon's own frame
+   and the knit follows the sags. Rows run across the ribbon, one per year;
+   stitches are stockinette Vs pointing back toward the cast-on edge. */
+function makeRibbon(ctrl, halfW, fold) {
+  const P = resample(open(ctrl, 40), 1), n = P.length, T = new Array(n), N = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const a = P[Math.max(0, i - 5)], b = P[Math.min(n - 1, i + 5)], t = vnorm(vsub(b, a));
+    T[i] = t; N[i] = [t[1], -t[0]];
+  }
+  const L = n - 1;
+  const idx = u => { const x = clamp(u, 0, L), i = Math.min(L - 1, Math.floor(x)); return [i, x - i]; };
+  /* fold(u) → [vk, c, c2]: above v = vk the cloth lies on the lap, seen from
+     above, foreshortened by c; below vk it curls over the knees (c2). */
+  const fv = (u, v) => { if (!fold) return v; const [vk, c, c2] = fold(u); return v >= vk ? v * c : vk * c + (v - vk) * c2; };
+  const rb = {
+    P, L, W: halfW, fv,
+    pos(u) { const [i, f] = idx(u); return vlerp(P[i], P[i + 1], f); },
+    nrm(u) { const [i, f] = idx(u); return vnorm(vlerp(N[i], N[i + 1], f)); },
+    tan(u) { const [i, f] = idx(u); return vnorm(vlerp(T[i], T[i + 1], f)); },
+    at(u, v) { const p = rb.pos(u), m = rb.nrm(u), w = halfW(u) * fv(u, v); return [p[0] + m[0] * w, p[1] + m[1] * w]; },
+  };
+  return rb;
+}
+/** Closed outline of the ribbon between u0 and u1 at |v| = e. */
+function ribbonOutline(rb, e = 1, u0 = 0, u1 = rb.L, step = 2) {
+  const top = [], bot = [];
+  for (let u = u0; u < u1; u += step) { top.push(rb.at(u, e)); bot.push(rb.at(u, -e)); }
+  top.push(rb.at(u1, e)); bot.push(rb.at(u1, -e));
+  return top.concat(bot.reverse());
+}
+
+/* One leg of a knit V, pre-rendered per yarn colour: a plump plied loop with a
+   twist, a highlight, a shadow on its lower side and a halo of fibres. Drawn
+   along +x; the leg fills 76 % of the sprite's width and 64 % of its height. */
+const LEG_W = 96, LEG_H = 48, LEG_FX = .76, LEG_FY = .64;
+function buildLeg(col, key) {
+  const c = cv(LEG_W, LEG_H), g = ctxOf(c), r = rngFor('leg:' + key);
+  const cx = LEG_W / 2, cy = LEG_H / 2, a = LEG_W * LEG_FX / 2, b = LEG_H * LEG_FY / 2;
+  const body = new Path2D();
+  for (let i = 0; i <= 56; i++) {
+    const th = i / 56 * TAU, cs = Math.cos(th), sn = Math.sin(th);
+    const x = cx + a * Math.sign(cs) * Math.pow(Math.abs(cs), .92), y = cy + b * sn * (1 + .1 * cs);
+    i ? body.lineTo(x, y) : body.moveTo(x, y);
+  }
+  body.closePath();
+  const lum = (.3 * col[0] + .59 * col[1] + .11 * col[2]) / 255;
+  // halo of loose fibres
+  g.lineCap = 'round';
+  for (let i = 0; i < 90; i++) {
+    const th = r() * TAU, ex = cx + Math.cos(th) * a * .9, ey = cy + Math.sin(th) * b * .92;
+    const an = Math.atan2(Math.sin(th) * a, Math.cos(th) * b) + (r() - .5) * 1.9, L = 5 + r() * r() * 16;
+    g.strokeStyle = css(light(col, .12 + r() * .25), .3 + r() * .3); g.lineWidth = 1.1 + r() * .9;
+    g.beginPath(); g.moveTo(ex, ey);
+    g.quadraticCurveTo(ex + Math.cos(an) * L * .5 + (r() - .5) * 5, ey + Math.sin(an) * L * .5 + (r() - .5) * 5, ex + Math.cos(an) * L, ey + Math.sin(an) * L);
+    g.stroke();
+  }
+  // soft cast shadow below the leg
+  g.save(); g.filter = 'blur(3px)'; g.fillStyle = css(dark(col, .8), .7); g.translate(2, 4); g.fill(body); g.restore();
+  // body with cross shading (light from above)
+  const gr = g.createLinearGradient(0, cy - b, 0, cy + b);
+  gr.addColorStop(0, css(light(col, lum > .75 ? .35 : .2)));
+  gr.addColorStop(.4, css(col));
+  gr.addColorStop(.78, css(dark(col, lum > .75 ? .2 : .28)));
+  gr.addColorStop(1, css(dark(col, lum > .75 ? .38 : .5)));
+  g.fillStyle = gr; g.fill(body);
+  g.save(); g.clip(body);
+  // ends dive under neighbouring loops
+  const ge = g.createLinearGradient(cx - a, 0, cx + a, 0);
+  ge.addColorStop(0, css(dark(col, .75), .8)); ge.addColorStop(.22, css(dark(col, .6), 0));
+  ge.addColorStop(.8, css(dark(col, .6), 0)); ge.addColorStop(1, css(dark(col, .75), .75));
+  g.fillStyle = ge; g.fillRect(0, 0, LEG_W, LEG_H);
+  // plies: diagonal twist bands
+  const nP = 6, ph = r(), sl = b * 1.25;
+  for (let k = -2; k < nP + 2; k++) {
+    const x = cx - a + (k + ph) * (2 * a / nP);
+    g.strokeStyle = css(dark(col, .55), .55); g.lineWidth = 2.2;
+    g.beginPath(); g.moveTo(x - sl, cy + b * 1.1); g.quadraticCurveTo(x - sl * .1, cy + b * .2, x + sl * .9, cy - b * 1.1); g.stroke();
+    g.strokeStyle = css(light(col, lum > .75 ? .6 : .42), .42); g.lineWidth = 2.6;
+    const x2 = x + a / nP * .9;
+    g.beginPath(); g.moveTo(x2 - sl * .7, cy + b * .5); g.quadraticCurveTo(x2 - sl * .1, cy - b * .1, x2 + sl * .5, cy - b * .85); g.stroke();
+  }
+  // sheen along the upper third
+  g.strokeStyle = css(light(col, .55), lum > .75 ? .25 : .28); g.lineWidth = b * .45;
+  g.beginPath(); g.moveTo(cx - a * .6, cy - b * .38); g.quadraticCurveTo(cx, cy - b * .62, cx + a * .6, cy - b * .38); g.stroke();
+  // fibre texture inside
+  for (let i = 0; i < 60; i++) {
+    const x = cx + (r() - .5) * 2 * a, y = cy + (r() - .5) * 2 * b, an = r() * TAU, L = 3 + r() * 7;
+    g.strokeStyle = r() < .55 ? css(light(col, .35), .35) : css(dark(col, .4), .3); g.lineWidth = .9;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(an) * L, y + Math.sin(an) * L); g.stroke();
+  }
+  g.restore();
+  // a few fibres crossing the edge on top
+  for (let i = 0; i < 16; i++) {
+    const th = r() * TAU, ex = cx + Math.cos(th) * a * .8, ey = cy + Math.sin(th) * b * .8, an = th + (r() - .5), L = 6 + r() * 9;
+    g.strokeStyle = css(light(col, .3), .45); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(ex, ey); g.lineTo(ex + Math.cos(an) * L, ey + Math.sin(an) * L * .6); g.stroke();
+  }
+  return c;
+}
+let LEGS = null;
+function buildLegs() {
+  LEGS = {};
+  for (const ci of new Set(ROW_CI)) { LEGS[ci] = []; for (let v = 0; v < 4; v++) LEGS[ci].push(buildLeg(STRIPE_RGB[ci], ci + ':' + v)); }
+}
+/** Draw a leg sprite so the leg spans a→b (length × stretch) with width w px. */
+function drawLeg(g, spr, a, b, w, stretch = 1.2) {
+  const d = vsub(b, a), len = vlen(d) * stretch, an = Math.atan2(d[1], d[0]), m = vlerp(a, b, .5);
+  g.setTransform(Math.cos(an), Math.sin(an), -Math.sin(an), Math.cos(an), m[0], m[1]);
+  g.drawImage(spr, -len / 2 / LEG_FX, -w / 2 / LEG_FY, len / LEG_FX, w / LEG_FY);
+  g.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+/** The knitted fabric: valleys, then the rows of Vs from cast-on to needle. */
+function drawKnit(g, rb, K) {
+  const { u0, rh, nc } = K, dv = 2 / nc, r = rngFor('knit:jitter');
+  // valleys: the fabric seen between the loops
+  for (let k = 0; k < NROWS; k++) {
+    const ua = u0 + k * rh - .6, ub = u0 + (k + 1) * rh + .6, c = STRIPE_RGB[ROW_CI[k]];
+    const q = [];
+    for (let u = ua; u < ub; u += 2) q.push(rb.at(u, .97));
+    q.push(rb.at(ub, .97));
+    for (let u = ub; u > ua; u -= 2) q.push(rb.at(u, -.97));
+    q.push(rb.at(ua, -.97));
+    fillPts(g, q, css(dark(c, .66)));
+  }
+  // cast-on edge: a firm little chain along u = 0
+  const c0 = STRIPE_RGB[ROW_CI[0]];
+  for (let j = 0; j <= nc; j++) {
+    const v = -1 + j * dv;
+    drawLeg(g, LEGS[ROW_CI[0]][j % 4], rb.at(u0 * .45, v - dv * .45), rb.at(u0 * .45, v + dv * .45), u0 * 1.05, 1.05);
+  }
+  // stitches
+  for (let k = 0; k < NROWS; k++) {
+    const spr = LEGS[ROW_CI[k]], uc = u0 + (k + .5) * rh;
+    for (let j = 0; j < nc; j++) {
+      const vj = -1 + (j + .5) * dv;
+      const sides = r() < .5 ? [-1, 1] : [1, -1];
+      for (const s of sides) {
+        const A = rb.at(uc - .5 * rh + (r() - .5) * .8, vj + s * .07 * dv + (r() - .5) * .03 * dv);
+        const B = rb.at(uc + .55 * rh + (r() - .5) * .8, vj + s * .5 * dv + (r() - .5) * .04 * dv);
+        const comp = vlen(vsub(rb.at(uc, vj + dv / 2), rb.at(uc, vj - dv / 2))) / (rb.W(uc) * dv);
+        const w = rb.W(uc) * dv * .64 * comp * (1 + (r() - .5) * .1);
+        drawLeg(g, spr[Math.floor(r() * 4)], A, B, w, 1.13 * (1 + (r() - .5) * .08));
+      }
+    }
+  }
+}
+/** Loose fibres over the whole fabric: the fuzzy halo of real wool. */
+function knitFuzz(g, rb, K, dens = 1) {
+  const r = rngFor('knit:fuzz'), n = Math.round(rb.L * 30 * dens);
+  g.save(); g.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const u = r() * rb.L, v = (r() * 2 - 1) * 1.08, p = rb.at(u, v);
+    const k = clamp(Math.floor((u - K.u0) / K.rh), 0, NROWS - 1), c = STRIPE_RGB[ROW_CI[k]];
+    const an = r() * TAU, L = 2 + r() * r() * 9, bend = (r() - .5) * 3;
+    g.strokeStyle = css(light(c, .15 + r() * .3), .22 + r() * .3); g.lineWidth = .45 + r() * .4;
+    g.beginPath(); g.moveTo(p[0], p[1]);
+    g.quadraticCurveTo(p[0] + Math.cos(an) * L * .5 - Math.sin(an) * bend, p[1] + Math.sin(an) * L * .5 + Math.cos(an) * bend, p[0] + Math.cos(an) * L, p[1] + Math.sin(an) * L);
+    g.stroke();
+  }
+  g.restore();
+}
+/** Folds, sags and the turn of the cloth: fn(u, v) → [multiply, add-light]. */
+function shadeRibbon(g, rb, fn, clip, W, H) {
+  const sc = cv(W, H), s = ctxOf(sc), hc = cv(W, H), h = ctxOf(hc);
+  s.fillStyle = '#fff'; s.fillRect(0, 0, W, H); h.fillStyle = '#000'; h.fillRect(0, 0, W, H);
+  const du = 3, nv = 16;
+  for (let u = 0; u < rb.L; u += du) for (let j = 0; j < nv; j++) {
+    const va = -1.12 + j * 2.24 / nv, vb = va + 2.24 / nv;
+    const q = [rb.at(u - .6, va - .02), rb.at(u + du + .6, va - .02), rb.at(u + du + .6, vb + .02), rb.at(u - .6, vb + .02)];
+    const [m, a] = fn(u + du / 2, (va + vb) / 2);
+    const gm = Math.round(clamp(m) * 255); s.fillStyle = `rgb(${gm},${gm},${gm})`; fillPts(s, q);
+    if (a > .004) { const ga = Math.round(clamp(a) * 255); h.fillStyle = `rgb(${ga},${ga},${ga})`; fillPts(h, q); }
+  }
+  g.save(); g.clip(clip); g.filter = 'blur(3px)';
+  g.globalCompositeOperation = 'multiply'; g.drawImage(sc, 0, 0);
+  g.globalCompositeOperation = 'screen'; g.drawImage(hc, 0, 0);
+  g.restore();
+}
+
+/* ── 8. Needles, loops, fringe ────────────────────────────────────────────── */
+/** A tapered wooden knitting needle with a knob, knob → tip. */
+function needle(g, knob, tip, D, key) {
+  const ax = vnorm(vsub(tip, knob)), nn = [-ax[1], ax[0]], L = vlen(vsub(tip, knob)), r = rngFor('needle:' + key);
+  const half = s => s < .84 ? D / 2 * (1 - .1 * s) : D / 2 * .916 * Math.pow(Math.max(0, (1 - s) / .16), .55) + .6;
+  const left = [], right = [];
+  for (let i = 0; i <= 60; i++) { const s = i / 60, p = vadd(knob, vmul(ax, s * L)), h = half(s); left.push(vadd(p, vmul(nn, h))); right.push(vadd(p, vmul(nn, -h))); }
+  const outline = left.concat(right.reverse()), path = pathOf(outline);
+  dropShadow(g, path, 3, 6, 3.5, .45);
+  const wood = [196, 148, 92];
+  const gr = g.createLinearGradient(knob[0] + nn[0] * D / 2, knob[1] + nn[1] * D / 2, knob[0] - nn[0] * D / 2, knob[1] - nn[1] * D / 2);
+  const up = nn[1] < 0; // which side faces the light
+  const stops = [[0, dark(wood, .35)], [.3, light(wood, .35)], [.55, wood], [1, dark(wood, .45)]];
+  for (const [s, c] of stops) gr.addColorStop(up ? s : 1 - s, css(c));
+  g.save(); g.fillStyle = gr; g.fill(path); g.clip(path);
+  g.lineWidth = .7;
+  for (let i = 0; i < 5; i++) {
+    const off = (r() - .5) * D * .7, s0 = r() * .3, s1 = s0 + .3 + r() * .5;
+    g.strokeStyle = css(dark(wood, .3), .45); g.beginPath();
+    for (let s = s0; s < Math.min(1, s1); s += .02) { const p = vadd(vadd(knob, vmul(ax, s * L)), vmul(nn, off + Math.sin(s * 40 + i) * .4)); s === s0 ? g.moveTo(p[0], p[1]) : g.lineTo(p[0], p[1]); }
+    g.stroke();
+  }
+  g.restore();
+  // knob
+  const kc = vadd(knob, vmul(ax, -D * .55)), kr = D * 1.05;
+  g.save(); g.filter = 'blur(3px)'; g.fillStyle = 'rgba(40,20,10,.4)'; g.beginPath(); g.arc(kc[0] + 3, kc[1] + 5, kr, 0, TAU); g.fill(); g.restore();
+  const kg = g.createRadialGradient(kc[0] - kr * .35, kc[1] - kr * .4, kr * .1, kc[0], kc[1], kr);
+  kg.addColorStop(0, css(light([170, 110, 60], .45))); kg.addColorStop(.5, css([160, 100, 52])); kg.addColorStop(1, css(dark([150, 92, 48], .45)));
+  g.fillStyle = kg; g.beginPath(); g.arc(kc[0], kc[1], kr, 0, TAU); g.fill();
+  return { ax, nn, L, half };
+}
+/** The live row: each loop's front strand wraps over the needle. */
+function liveLoops(g, rb, K) {
+  const { nc } = K, dv = 2 / nc, c = STRIPE_RGB[ROW_CI[NROWS - 1]], t = rb.tan(rb.L), r = rngFor('loops');
+  for (let j = 0; j < nc; j++) {
+    const vj = -1 + (j + .5) * dv;
+    const a = rb.at(rb.L - K.rh * .45, vj - dv * .18), m = vadd(rb.at(rb.L, vj + dv * .05), vmul(t, K.rh * .75));
+    const e = vadd(rb.at(rb.L, vj + dv * .32), vmul(t, K.rh * .05));
+    const w = rb.W(rb.L) * dv * .5 * (1 + (r() - .5) * .1);
+    const P = [a, vlerp(a, m, .55), m, e];
+    g.save(); g.lineCap = 'round';
+    g.strokeStyle = 'rgba(30,5,5,.45)'; g.lineWidth = w + 2; g.beginPath(); trace(g, open(P, 8).map(([x, y]) => [x + 1.2, y + 2]), false); g.stroke();
+    g.strokeStyle = css(dark(c, .15)); g.lineWidth = w; g.beginPath(); trace(g, open(P, 8), false); g.stroke();
+    g.strokeStyle = css(light(c, .35), .6); g.lineWidth = w * .3; g.setLineDash([w * .5, w * .45]);
+    g.beginPath(); trace(g, open(P, 8).map(([x, y]) => [x - w * .12, y - w * .18]), false); g.stroke();
+    g.restore();
+  }
+}
+/** Tassels knotted through the cast-on edge; they hang with gravity. */
+function fringe(g, rb, K, key) {
+  const c = STRIPE_RGB[ROW_CI[0]], r = rngFor('fringe:' + key), t0 = rb.tan(0), n0 = rb.nrm(0), nt = 7;
+  for (let i = 0; i < nt; i++) {
+    const v = -.84 + i * 1.68 / (nt - 1), base = rb.at(1.5, v);
+    const len = 44 + r() * 16;
+    for (let s = 0; s < 3; s++) {
+      const p0 = vadd(base, vmul(n0, (s - 1) * 3));
+      const p1 = vadd(p0, vadd(vmul(t0, -len * .28), [(r() - .5) * 4, len * .22]));
+      const p2 = vadd(p0, vadd(vmul(t0, -len * .36), [(r() - .5) * 8, len * .95]));
+      plied(g, [p0, p1, p2], c, 3.6, key + i + ':' + s);
+    }
+    knot(g, base[0], base[1], 4.2, dark(c, .1), 'fr' + i);
+  }
+}
+
+/* ── 9. The room ──────────────────────────────────────────────────────────── */
+const C = {
+  wall: [236, 220, 192], skirting: [178, 132, 92], floor: [166, 112, 76], rug: [52, 104, 104],
+  frame: [104, 150, 136], sky: [247, 232, 198], sunHalo: [252, 206, 118], sun: [245, 150, 40], sunCore: [252, 196, 72],
+  roofs: [205, 142, 98], curtain: [72, 90, 138], navy: [34, 50, 88], teal: [44, 110, 112],
+  paper: [247, 242, 230], wood: [196, 148, 92], darkwood: [120, 78, 46],
+};
+
+function drawWallAndFloor(g, W, H) {
+  felt(g, [[-20, -20], [W + 20, -20], [W + 20, 880], [-20, 880]], C.wall, 'wall', {
+    shadow: false, ew: 0, ea: 0, fib: .8, mot: .13, stray: 0, hl: 0,
+    inner: (gg) => {
+      const gr = gg.createRadialGradient(260, 250, 50, 260, 250, 1500);
+      gr.addColorStop(0, 'rgba(255,236,190,.35)'); gr.addColorStop(.5, 'rgba(255,236,190,0)'); gr.addColorStop(1, 'rgba(90,50,20,.18)');
+      gg.fillStyle = gr; gg.fillRect(0, 0, W, 900);
+    },
+  });
+  felt(g, [[-20, 846], [W + 20, 846], [W + 20, 880], [-20, 880]], C.skirting, 'skirt', { sy: 3, sb: 3, ew: 5, ea: .35, stray: .6 });
+  felt(g, [[-20, 876], [W + 20, 876], [W + 20, H + 20], [-20, H + 20]], C.floor, 'floor', {
+    sy: -3, sb: 6, sa: .35, ew: 0, ea: 0, stray: 0, fib: .75,
+    inner: (gg) => {
+      const gr = gg.createLinearGradient(0, 876, 0, H);
+      gr.addColorStop(0, 'rgba(40,20,10,.35)'); gr.addColorStop(.25, 'rgba(40,20,10,0)'); gr.addColorStop(1, 'rgba(255,230,190,.06)');
+      gg.fillStyle = gr; gg.fillRect(0, 876, W, H);
+    },
+  });
+  for (const y of [930, 1000]) running(g, [[-10, y], [W + 10, y + 3]], dark(C.floor, .35), { len: 9, gap: 6, w: 1.4, key: 'fl' + y });
+  // rug under the feet
+  const rug = [[372, 908], [1548, 908], [1616, 1100], [304, 1100]];
+  const R = felt(g, rug, C.rug, 'rug', { sy: 4, sb: 4, sa: .45, ew: 12, ea: .4, stray: 1.4 });
+  running(g, [[388, 922], [1532, 922], [1592, 1090], [328, 1090]], [226, 196, 120], { closed: true, len: 10, gap: 6, w: 2, key: 'rugrun' });
+  running(g, [[400, 934], [1520, 934], [1576, 1090], [344, 1090]], [226, 196, 120], { closed: true, len: 4, gap: 9, w: 2, key: 'rugrun2' });
+}
+
+function drawWindow(g) {
+  const X0 = 86, Y0 = 70, X1 = 444, Y1 = 452, fw = 24;
+  const ox0 = X0 + fw, oy0 = Y0 + fw, ox1 = X1 - fw, oy1 = Y1 - fw;
+  // recess shadow and the view
+  const hole = pathOf(rrect(ox0, oy0, ox1 - ox0, oy1 - oy0, 3));
+  g.save(); g.clip(hole);
+  felt(g, [[ox0 - 10, oy0 - 10], [ox1 + 10, oy0 - 10], [ox1 + 10, oy1 + 10], [ox0 - 10, oy1 + 10]], C.sky, 'sky', {
+    shadow: false, ew: 0, ea: 0, stray: 0, fib: .5, mot: .15,
+    inner: (gg) => {
+      const gr = gg.createLinearGradient(0, oy0, 0, oy1);
+      gr.addColorStop(0, 'rgb(236,238,226)'); gr.addColorStop(.55, 'rgb(250,232,190)'); gr.addColorStop(1, 'rgb(250,214,160)');
+      gg.fillStyle = gr; gg.fillRect(ox0 - 10, oy0 - 10, ox1 - ox0 + 20, oy1 - oy0 + 20);
+    },
+  });
+  const sx = 250, sy = 214;
+  felt(g, ellipsePts(sx, sy, 106, 106, 90), C.sunHalo, 'halo', { sx: 0, sy: 2, sb: 8, sa: .18, ea: .25, ew: 12, stray: 1.2 });
+  const rr = rngFor('rays');
+  for (let i = 0; i < 18; i++) {
+    const a = i / 18 * TAU + .09, r0 = 112, r1 = 140 + rr() * 16;
+    running(g, [[sx + Math.cos(a) * r0, sy + Math.sin(a) * r0], [sx + Math.cos(a) * r1, sy + Math.sin(a) * r1]], [236, 128, 40], { len: 8, gap: 5, w: 2.6, key: 'ray' + i });
+  }
+  felt(g, ellipsePts(sx, sy, 80, 80, 80), C.sun, 'sun', { sx: 2, sy: 4, sb: 5, sa: .3, ea: .45, ew: 12, hl: .1 });
+  felt(g, ellipsePts(sx - 8, sy - 9, 55, 55, 64), C.sunCore, 'suncore', { sx: 2, sy: 3, sb: 4, sa: .22, ea: .3, ew: 9, hl: .18 });
+  running(g, ellipsePts(sx, sy, 70, 70, 60), [250, 208, 110], { closed: true, len: 6, gap: 5, w: 1.8, key: 'sunring' });
+  // heat shimmer over the rooftops
+  for (let k = 0; k < 3; k++) {
+    const pts = []; for (let x = ox0 + 6; x < ox1 - 6; x += 4) pts.push([x, 340 + k * 16 + Math.sin(x * .07 + k * 2) * 4]);
+    running(g, pts, [238, 150, 70], { len: 7, gap: 6, w: 1.6, key: 'haze' + k });
+  }
+  // distant rooftops with water tanks
+  const roof = [[ox0 - 8, oy1 + 10], [ox0 - 8, 392], [150, 392], [150, 372], [206, 372], [206, 386], [262, 386], [262, 360], [300, 360], [300, 350], [326, 350], [326, 380], [372, 380], [372, 366], [ox1 + 8, 366], [ox1 + 8, oy1 + 10]];
+  felt(g, roof, C.roofs, 'roofs', { raw: false, wob: .8, sx: 2, sy: 3, sb: 4, sa: .25, ea: .35, ew: 8 });
+  felt(g, rrect(268, 336, 26, 26, 5), [150, 150, 150], 'tank1', { sx: 2, sy: 3, sb: 3, ea: .4, ew: 6 });
+  felt(g, rrect(170, 352, 22, 22, 4), [120, 120, 125], 'tank2', { sx: 2, sy: 3, sb: 3, ea: .4, ew: 6 });
+  g.restore();
+  // inner shadow of the recess
+  g.save(); g.clip(hole); g.filter = 'blur(8px)'; g.strokeStyle = 'rgba(60,30,10,.45)'; g.lineWidth = 16; g.stroke(hole); g.restore();
+  // frame: four felt strips glued on
+  const fk = { sx: 3, sy: 5, sb: 5, sa: .35, ea: .45, ew: 8, stray: 1 };
+  felt(g, rrect(X0, Y0, X1 - X0, fw + 2, 4), C.frame, 'frT', fk);
+  felt(g, rrect(X0, Y0, fw + 2, Y1 - Y0, 4), C.frame, 'frL', fk);
+  felt(g, rrect(X1 - fw - 2, Y0, fw + 2, Y1 - Y0, 4), C.frame, 'frR', fk);
+  felt(g, rrect(X0 - 16, Y1 - fw, X1 - X0 + 32, fw + 12, 5), dark(C.frame, .08), 'frB', fk);
+  running(g, [[X0 + 8, Y0 + 12], [X1 - 8, Y0 + 12]], light(C.frame, .5), { len: 8, gap: 5, w: 1.5, key: 'frs1' });
+  running(g, [[X0 - 8, Y1 - fw + 12], [X1 + 8, Y1 - fw + 12]], light(C.frame, .5), { len: 8, gap: 5, w: 1.5, key: 'frs2' });
+  // curtains on a rod, tied back
+  felt(g, rrect(X0 - 50, Y0 - 34, X1 - X0 + 100, 12, 6), C.darkwood, 'rod', { sy: 4, sb: 3, ew: 4 });
+  const xm = (X0 + X1) / 2;
+  const curtL = [[X0 - 46, Y0 - 28], [X0 + 38, Y0 - 28], [X0 + 34, Y0 + 90], [X0 + 24, 250], [X0 + 4, 338], [X0 + 20, 404], [X0 + 36, 488], [X0 - 50, 492], [X0 - 46, 404], [X0 - 32, 338], [X0 - 42, 250], [X0 - 47, Y0 + 90]];
+  for (const s of [-1, 1]) {
+    const k = s < 0 ? 'L' : 'R', mx = p => s < 0 ? p : [2 * xm - p[0], p[1]];
+    const pp = s < 0 ? curtL : curtL.map(mx).reverse();
+    felt(g, blob(pp, 8), C.curtain, 'curt' + k, {
+      sx: 4, sy: 6, sb: 6, sa: .35, ea: .5, ew: 12,
+      inner: (gg, bb) => { const r = rngFor('cdots' + k); for (let y = bb[1] + 8; y < bb[3]; y += 22) for (let x = bb[0] + ((y / 22 | 0) % 2) * 11; x < bb[2]; x += 22) { gg.fillStyle = 'rgba(240,230,210,.85)'; gg.beginPath(); gg.arc(x + r() * 2, y + r() * 2, 2.6, 0, TAU); gg.fill(); } },
+    });
+    for (const fx of [-30, -8, 16]) running(g, open([mx([X0 + fx, Y0 - 18]), mx([X0 + fx * .9, 230]), mx([X0 - 13 + fx * .35, 326])]), dark(C.curtain, .4), { len: 7, gap: 5, w: 1.4, key: 'cf' + k + fx });
+    for (const fx of [-24, 4]) running(g, open([mx([X0 - 13 + fx * .3, 352]), mx([X0 + fx * 1.1, 480])]), dark(C.curtain, .4), { len: 7, gap: 5, w: 1.4, key: 'cfb' + k + fx });
+    const tc = mx([X0 - 13, 338]);
+    felt(g, rrect(tc[0] - 26, 330, 52, 16, 7), [214, 170, 80], 'tie' + k, { sy: 4, ew: 5 });
+  }
+}
+
+function drawCalendar(g) {
+  const x = 716, y = 104, w = 158, h = 226, cx = x + w / 2;
+  // nail and string
+  stitch(g, [cx, 70], [x + 26, y + 6], [150, 120, 90], 1.6); stitch(g, [cx, 70], [x + w - 26, y + 6], [150, 120, 90], 1.6);
+  knot(g, cx, 70, 4, [120, 110, 100], 'nail');
+  const page = felt(g, rrect(x, y, w, h, 6), C.paper, 'calp', { sx: 4, sy: 7, sb: 6, sa: .35, ea: .28, ew: 10, fib: .5 });
+  felt(g, rrect(x - 3, y - 3, w + 6, 30, 6), C.teal, 'calb', { sy: 3, sb: 3, ea: .4, ew: 6 });
+  for (let i = 0; i < 9; i++) knot(g, x + 16 + i * 15.8, y + 12, 2.6, [210, 205, 190], 'ring' + i);
+  // "2025" in felt numerals
+  const L = lettering('2025', cx, y + 64, 38, { weight: 1.4, track: 2.0, key: 'cal2025', wob: .12 });
+  for (let i = 0; i < L.strokes.length; i++) {
+    const st = L.strokes[i];
+    if (st.length < 2) continue;
+    felt(g, taper(resample(st, 2), () => 3.6), [176, 36, 30], 'dig' + i, { wob: .35, sx: 1.5, sy: 2.5, sb: 2, sa: .35, ea: .35, ew: 3, eb: 2, stray: .3, hl: 0 });
+  }
+  const M = lettering('MAY', cx, y + 106, 12, { weight: 1.2, key: 'calmay' });
+  for (const st of M.strokes) backstitch(g, st, C.navy, { len: 4, w: 1.3 });
+  // date grid: little stitches, one day ringed
+  for (let r = 0; r < 5; r++) for (let c = 0; c < 7; c++) {
+    const px = x + 22 + c * 19, py = y + 130 + r * 18;
+    if (r === 4 && c > 3) continue;
+    stitch(g, [px - 3, py], [px + 3, py], c === 6 ? [190, 50, 40] : [110, 100, 90], 1.5, { sa: .2 });
+  }
+  running(g, ellipsePts(x + 22 + 4 * 19, y + 130 + 3 * 18, 9, 7, 24), [190, 50, 40], { closed: true, len: 4, gap: 1.5, w: 1.4, key: 'ring' });
+  blanket(g, page.P, [160, 120, 90], { sp: 11, d: 6, w: 1.3 });
+}
+
+function drawHoop(g) {
+  const cx = 1596, cy = 226, R = 132, rin = R - 12;
+  knot(g, cx, cy - R - 20, 4.5, [120, 110, 100], 'hnail');
+  // Aida cloth
+  const cloth = ellipsePts(cx, cy, rin + 2, rin + 2, 120);
+  felt(g, cloth, [244, 237, 222], 'aida', {
+    wob: .4, shadow: false, ew: 16, eb: 9, ea: .2, fib: .35, stray: 0,
+    inner: (gg, bb) => {
+      gg.fillStyle = 'rgba(120,100,70,.28)';
+      for (let yy = bb[1]; yy < bb[3]; yy += 6) for (let xx = bb[0]; xx < bb[2]; xx += 6) { gg.fillRect(xx + 2.5, yy + 2.5, 1.3, 1.3); }
+      gg.strokeStyle = 'rgba(255,255,255,.35)'; gg.lineWidth = 1;
+      for (let yy = bb[1]; yy < bb[3]; yy += 6) { gg.beginPath(); gg.moveTo(bb[0], yy); gg.lineTo(bb[2], yy); gg.stroke(); }
+    },
+  });
+  // cross-stitched title from the kit's lettering strokes, snapped to the cloth grid
+  const s = 6, gx0 = Math.floor((cx - 200) / s) * s, gy0 = Math.floor((cy - 200) / s) * s;
+  const cells = (strokes) => {
+    const set = new Map();
+    for (const st of strokes) for (const [px, py] of resample(st, .5)) {
+      const i = Math.floor((px - gx0) / s), j = Math.floor((py - gy0) / s); set.set(i + ',' + j, [i, j]);
+    }
+    return [...set.values()];
+  };
+  const T1 = lettering('THE', cx, cy - 58, 30, { key: 'hoopTHE', wob: 0 }), T2 = lettering('SCARF', cx, cy - 6, 50, { key: 'hoopSCARF', wob: 0 });
+  for (const [i, j] of cells(T1.strokes)) xstitch(g, gx0 + (i + .5) * s, gy0 + (j + .5) * s, s, C.navy, 1.9);
+  for (const [i, j] of cells(T2.strokes)) xstitch(g, gx0 + (i + .5) * s, gy0 + (j + .5) * s, s, C.navy, 1.9);
+  // a little band of warming stripes: one column per four years
+  const cols = 19, bx = cx - cols * s / 2;
+  for (let c = 0; c < cols; c++) {
+    let acc = 0, n = 0; for (let k = c * 4; k < Math.min(NROWS, c * 4 + 4); k++) { acc += ROW_CI[k]; n++; }
+    const ci = Math.round(acc / n);
+    for (let rr = 0; rr < 3; rr++) xstitch(g, Math.round(bx / s) * s + (c + .5) * s, gy0 + (Math.floor((cy + 46 - gy0) / s) + rr + .5) * s, s, STRIPE_RGB[ci], 1.9);
+  }
+  // wooden rings and the brass clasp
+  const ring = (r0, r1, key, colr) => {
+    const outer = ellipsePts(cx, cy, r1, r1, 140), inner = ellipsePts(cx, cy, r0, r0, 140).reverse();
+    const P = outer.concat([outer[0]], [inner[inner.length - 1]], inner);
+    const path = new Path2D(); path.addPath(pathOf(outer)); path.addPath(pathOf(ellipsePts(cx, cy, r0, r0, 140)));
+    g.save(); g.filter = 'blur(5px)'; g.fillStyle = 'rgba(40,22,10,.4)'; g.translate(3, 6); g.fill(path, 'evenodd'); g.restore();
+    const gr = g.createLinearGradient(cx - r1, cy - r1, cx + r1, cy + r1);
+    gr.addColorStop(0, css(light(colr, .3))); gr.addColorStop(.5, css(colr)); gr.addColorStop(1, css(dark(colr, .3)));
+    g.save(); g.fillStyle = gr; g.fill(path, 'evenodd'); g.clip(path, 'evenodd');
+    g.strokeStyle = css(dark(colr, .3), .5); g.lineWidth = .8;
+    for (let k = 0; k < 4; k++) { g.beginPath(); g.arc(cx, cy, r0 + (r1 - r0) * (k + .5) / 4, k, k + 4.5); g.stroke(); }
+    g.restore();
+    void P; void key;
+  };
+  ring(rin - 1, rin + 6, 'in', [206, 164, 110]);
+  ring(rin + 6, R, 'out', [198, 152, 98]);
+  felt(g, rrect(cx - 16, cy - R - 12, 32, 18, 4), [176, 150, 90], 'clasp', { sy: 4, ew: 5, ea: .5, wob: .3 });
+  knot(g, cx, cy - R - 3, 4, [210, 190, 130], 'screw');
+}
+
+function drawFanTable(g) {
+  const tx = 1768;
+  // side table: top, apron and three legs
+  for (const [lx, key] of [[1690, 'l1'], [1846, 'l2']]) felt(g, rrect(lx - 9, 670, 18, 232, 6), C.darkwood, 'tleg' + key, { sy: 4, ew: 6 });
+  felt(g, rrect(tx - 10, 670, 20, 236, 6), dark(C.darkwood, .1), 'tlegm', { sy: 4, ew: 6 });
+  felt(g, rrect(1666, 662, 204, 26, 8), C.darkwood, 'tapron', { sy: 5, ew: 6 });
+  felt(g, blob(ellipsePts(tx, 656, 112, 16, 24)), light(C.darkwood, .12), 'ttop', { sy: 6, sb: 6, ew: 7, ea: .45 });
+  // a crocheted doily under the fan
+  const doily = []; for (let i = 0; i < 48; i++) { const a = i / 48 * TAU, rr = 1 + .08 * Math.cos(a * 12); doily.push([tx + Math.cos(a) * 74 * rr, 654 + Math.sin(a) * 11 * rr]); }
+  felt(g, doily, [246, 240, 226], 'doily', { sx: 1, sy: 2, sb: 2, ew: 4, ea: .2, wob: .3 });
+  // fan
+  const fx = tx, fy = 506, body = [214, 222, 206];
+  felt(g, blob(ellipsePts(fx, 640, 56, 13, 20)), body, 'fbase', { sy: 4, ew: 6 });
+  felt(g, rrect(fx - 13, 560, 26, 82, 10), dark(body, .08), 'fneck', { sy: 4, ew: 6 });
+  felt(g, ellipsePts(fx + 4, fy + 6, 40, 36, 40), dark(body, .12), 'fmotor', { sy: 5, ew: 8 });
+  const Rg = 86;
+  felt(g, ellipsePts(fx, fy, Rg, Rg, 90), [196, 214, 214], 'fback', { sx: 5, sy: 8, sb: 8, sa: .35, ew: 16, ea: .25, fib: .5 });
+  for (let i = 0; i < 3; i++) {
+    const a = i / 3 * TAU + .5, bl = [];
+    for (let k = 0; k <= 20; k++) { const t = k / 20 * Math.PI; bl.push([Math.cos(t) * 30, Math.sin(t) * 64 - 4]); }
+    const P = blob([[-6, 10], [-26, 40], [-30, 64], [-10, 76], [16, 70], [22, 44], [8, 14]], 6).map(([x, y]) => [fx + x * Math.cos(a) - y * Math.sin(a), fy + x * Math.sin(a) + y * Math.cos(a)]);
+    felt(g, P, [150, 186, 200], 'blade' + i, { sx: 2, sy: 3, sb: 3, ew: 7, ea: .35 });
+    void bl;
+  }
+  felt(g, ellipsePts(fx, fy, 17, 17, 30), [200, 70, 50], 'fhub', { sy: 3, ew: 5 });
+  knot(g, fx, fy, 5, [240, 220, 180], 'fhubk');
+  // guard wires
+  const wire = [120, 124, 128];
+  for (const r of [26, 50, 72, Rg - 3]) running(g, ellipsePts(fx, fy, r, r, 70), wire, { closed: true, len: 12, gap: .8, w: r > 80 ? 2.4 : 1.4, key: 'gw' + r });
+  for (let i = 0; i < 16; i++) { const a = i / 16 * TAU; stitch(g, [fx + Math.cos(a) * 18, fy + Math.sin(a) * 18], [fx + Math.cos(a) * (Rg - 3), fy + Math.sin(a) * (Rg - 3)], wire, 1.2, { sa: .25 }); }
+  // a breeze toward the family
+  for (let k = 0; k < 3; k++) {
+    const pts = []; for (let x = fx - 100; x > fx - 190 - k * 20; x -= 4) pts.push([x, fy - 40 + k * 36 + Math.sin(x * .09 + k) * 5]);
+    running(g, pts, [170, 196, 206], { len: 6, gap: 6, w: 1.6, key: 'breeze' + k });
+  }
+}
+
+/** 1950: a sepia photograph of the young grandmother knitting, in a felt frame. */
+function drawPhoto(g) {
+  const cx = 1126, cy = 168, w = 112, h = 138, sep = [196, 168, 128], ink = [92, 66, 44];
+  stitch(g, [cx, 82], [cx - 34, cy - h / 2 + 4], [150, 120, 90], 1.5); stitch(g, [cx, 82], [cx + 34, cy - h / 2 + 4], [150, 120, 90], 1.5);
+  knot(g, cx, 82, 3.6, [120, 110, 100], 'pnail');
+  felt(g, rrect(cx - w / 2, cy - h / 2, w, h, 6), [150, 104, 64], 'pframe', { sx: 4, sy: 7, sb: 6, sa: .38, ew: 8, ea: .5 });
+  felt(g, rrect(cx - w / 2 + 11, cy - h / 2 + 11, w - 22, h - 22, 3), [238, 228, 206], 'pmat', { sx: 1, sy: 2, sb: 3, sa: .3, ew: 6, ea: .25, stray: 0 });
+  const px0 = cx - 34, py0 = cy - 52, pw = 68, ph = 78;
+  const photo = felt(g, rrect(px0, py0, pw, ph, 2), sep, 'pphoto', { shadow: false, ew: 10, ea: .35, fib: .6, stray: 0 });
+  g.save(); g.clip(photo.path);
+  const fx = cx - 2, fy = py0 + 36;
+  felt(g, blob([[fx - 30, py0 + ph + 4], [fx - 24, fy + 22], [fx, fy + 16], [fx + 24, fy + 22], [fx + 30, py0 + ph + 4]], 6), dark(sep, .35), 'pbody', { sx: 1, sy: 2, sb: 2, ew: 4, ea: .3, stray: 0 });
+  felt(g, ellipsePts(fx + 9, fy - 20, 8, 7, 20), dark(sep, .62), 'pbun', { sx: 1, sy: 1, sb: 1, ew: 3, ea: .3, stray: 0 });
+  felt(g, blob([[fx, fy - 17], [fx + 12, fy - 12], [fx + 13, fy + 2], [fx, fy + 13], [fx - 13, fy + 2], [fx - 12, fy - 12]], 6), light(sep, .35), 'pface', { sx: 1, sy: 1.5, sb: 1.5, ew: 4, ea: .25, stray: 0, fib: .4 });
+  felt(g, blob([[fx - 13, fy - 3], [fx - 12, fy - 13], [fx, fy - 19], [fx + 12, fy - 13], [fx + 13, fy - 3], [fx + 8, fy - 10], [fx, fy - 12], [fx - 8, fy - 10]], 6), dark(sep, .62), 'phair', { sx: 1, sy: 1, sb: 1, ew: 3, ea: .3, stray: 0 });
+  for (const s of [-1, 1]) knot(g, fx + s * 5, fy - 1, 1.3, ink, 'peye' + s);
+  backstitch(g, open([[fx - 4, fy + 5], [fx, fy + 7], [fx + 4, fy + 5]], 3), ink, { len: 3, w: 1 });
+  // needles and a first few rows of knitting
+  stitch(g, [fx - 20, py0 + ph - 6], [fx + 6, fy + 26], light(sep, .5), 1.6, { sa: .2 });
+  stitch(g, [fx + 22, py0 + ph - 6], [fx - 4, fy + 26], light(sep, .5), 1.6, { sa: .2 });
+  felt(g, rrect(fx - 9, fy + 30, 18, 14, 2), light(sep, .18), 'pknit', { sx: 1, sy: 1, sb: 1, ew: 3, ea: .3, stray: 0 });
+  g.restore();
+  const T = lettering('1950', cx, cy + h / 2 - 17, 10, { weight: 1.2, key: 'p1950' });
+  for (const st of T.strokes) backstitch(g, st, ink, { len: 3, w: 1.1 });
+}
+
+/* ── 10. Sofa, cushions, basket, yarn balls ───────────────────────────────── */
+const SOFA = { m: [214, 160, 56], x0: 298, x1: 1622, seatTop: 642, seatFront: 690, seatBot: 778, base: 872 };
+
+function cushionShape(cx, cy, s, rot) {
+  const h = s / 2, pts = [[-h, -h], [0, -h * .9], [h, -h], [h * .9, 0], [h, h], [0, h * .9], [-h, h], [-h * .9, 0]];
+  return rotPts(blob(pts, 8).map(([x, y]) => [cx + x, cy + y]), cx, cy, rot);
+}
+
+function drawSofaBack(g) {
+  const m = SOFA.m, seam = dark(m, .45);
+  felt(g, rrect(326, 392, 1268, 420, 60), dark(m, .12), 'sofaBack', { sx: 6, sy: 10, sb: 10, sa: .38, ew: 16, ea: .5 });
+  running(g, open([[342, 452], [350, 420], [384, 406], [960, 404], [1536, 406], [1570, 420], [1578, 452]]), seam, { len: 8, gap: 5, w: 1.8, key: 'backSeam' });
+  for (let i = 0; i < 3; i++) {
+    const x = 452 + i * 356, P = blob([[x + 8, 422], [x + 176, 416], [x + 344, 422], [x + 352, 540], [x + 346, 666], [x + 176, 672], [x + 6, 666], [x, 540]], 8);
+    const c = felt(g, P, m, 'backC' + i, { sx: 3, sy: 6, sb: 7, sa: .35, ew: 22, eb: 10, ea: .55, hl: .14 });
+    running(g, blob([[x + 20, 434], [x + 176, 429], [x + 332, 434], [x + 339, 540], [x + 334, 652], [x + 176, 658], [x + 18, 652], [x + 13, 540]], 8), seam, { closed: true, len: 8, gap: 5, w: 1.8, key: 'bcs' + i });
+    void c;
+  }
+}
+function drawThrowCushions(g) {
+  const L = felt(g, cushionShape(506, 566, 158, -.2), [196, 98, 62], 'cushL', { sx: 5, sy: 8, sb: 8, sa: .4, ew: 18, eb: 8, ea: .5, hl: .16 });
+  blanket(g, L.P, [244, 226, 196], { sp: 12, d: 8, w: 1.8 });
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * TAU - .2, px = 506 + Math.cos(a) * 18, py = 566 + Math.sin(a) * 18;
+    felt(g, ellipsePts(px, py, 13, 7, 20, a), [236, 190, 84], 'petal' + i, { sx: 1, sy: 2, sb: 2, ew: 4, ea: .35, wob: .4, stray: .2 });
+  }
+  knot(g, 506, 566, 6, [120, 40, 30], 'flc');
+  const R = felt(g, cushionShape(1452, 566, 150, .17), [58, 132, 128], 'cushR', { sx: 5, sy: 8, sb: 8, sa: .4, ew: 18, eb: 8, ea: .5, hl: .16 });
+  blanket(g, R.P, [240, 226, 190], { sp: 12, d: 8, w: 1.8 });
+  running(g, cushionShape(1452, 566, 82, .17), [240, 226, 190], { closed: true, len: 7, gap: 5, w: 1.8, key: 'cushRin' });
+}
+function drawSofaFront(g) {
+  const m = SOFA.m, seam = dark(m, .45);
+  for (let i = 0; i < 3; i++) {
+    const x = 448 + i * 358;
+    felt(g, blob([[x + 4, 652], [x + 180, 646], [x + 352, 652], [x + 358, 676], [x + 354, 700], [x + 180, 706], [x + 2, 700], [x - 2, 676]], 6), light(m, .1), 'seatTop' + i, { sx: 0, sy: -3, sb: 5, sa: .25, ew: 12, ea: .35, hl: .12 });
+    const F = felt(g, rrect(x, 696, 358, 94, 16), dark(m, .06), 'seatF' + i, { sx: 2, sy: 6, sb: 6, sa: .4, ew: 16, ea: .5 });
+    running(g, rrect(x + 10, 706, 338, 74, 10), seam, { closed: true, len: 8, gap: 5, w: 1.8, key: 'sfs' + i });
+    void F;
+  }
+  felt(g, rrect(316, 784, 1288, 96, 16), dark(m, .2), 'sofaBase', { sx: 4, sy: 8, sb: 8, sa: .45, ew: 14, ea: .5 });
+  running(g, [[330, 798], [1590, 798]], dark(m, .5), { len: 8, gap: 5, w: 1.8, key: 'baseSeam' });
+  for (const lx of [360, 1560]) felt(g, [[lx - 16, 874], [lx + 16, 874], [lx + 9, 904], [lx - 9, 904]], C.darkwood, 'sleg' + lx, { sy: 3, sb: 3, ew: 4, wob: .4 });
+  // rolled arms
+  for (const s of [-1, 1]) {
+    const k = s < 0 ? 'L' : 'R', ax = s < 0 ? 377 : 1543;
+    const P = blob([[ax - 80, 572], [ax - 70, 530], [ax - 36, 512], [ax + 36, 512], [ax + 70, 530], [ax + 80, 572], [ax + 80, 882], [ax - 80, 882]], 8);
+    felt(g, P, dark(m, .04), 'arm' + k, { sx: 5 * -s + 3, sy: 8, sb: 9, sa: .4, ew: 18, ea: .55, hl: .14 });
+    felt(g, ellipsePts(ax, 566, 50, 46, 60), m, 'scroll' + k, { sx: 2, sy: 5, sb: 6, sa: .35, ew: 14, ea: .5, hl: .16 });
+    const sp = []; for (let t = 0; t < 1; t += .01) { const a = t * TAU * 1.6 + (s < 0 ? 0 : Math.PI), rr = 36 * (1 - t * .8); sp.push([ax + Math.cos(a) * rr, 566 + Math.sin(a) * rr * .92]); }
+    running(g, sp, seam, { len: 7, gap: 4, w: 1.8, key: 'spiral' + k });
+    running(g, [[ax - 66, 626], [ax - 66, 858], [ax + 66, 858], [ax + 66, 626]], seam, { len: 8, gap: 5, w: 1.8, key: 'armSeam' + k });
+  }
+  // the seat cushions give where each woman sits
+  for (const [x, rx] of [[612, 130], [960, 140], [1320, 136]]) {
+    g.save(); g.filter = 'blur(9px)'; g.fillStyle = 'rgba(70,40,10,.42)';
+    g.beginPath(); g.ellipse(x, 664, rx, 22, 0, 0, TAU); g.fill(); g.restore();
+  }
+}
+
+/** A ball of yarn: bundles of wraps over a sphere, lit from the upper left. */
+function yarnBall(g, cx, cy, r, color, key, o = {}) {
+  const c = col3(color), rr = rngFor('ball:' + key), yw = o.yw ?? 6;
+  g.save(); g.filter = 'blur(6px)'; g.fillStyle = 'rgba(35,15,5,.5)'; g.beginPath(); g.ellipse(cx + r * .22, cy + r * .32, r, r * .96, 0, 0, TAU); g.fill(); g.restore();
+  g.save();
+  g.fillStyle = css(dark(c, .5)); g.beginPath(); g.arc(cx, cy, r, 0, TAU); g.fill();
+  g.beginPath(); g.arc(cx, cy, r * 1.02, 0, TAU); g.clip();
+  g.lineCap = 'round';
+  for (let b = 0; b < 8; b++) {
+    const rot = rr() * Math.PI, k = .2 + rr() * .8, n = 5 + Math.floor(rr() * 3);
+    for (let i = 0; i < n; i++) {
+      const kk = Math.max(.05, k - i * yw / r * .9), a0 = rr() * .3, a1 = Math.PI - rr() * .3;
+      g.strokeStyle = css(dark(c, .6), .8); g.lineWidth = yw + 1.6;
+      g.beginPath(); g.ellipse(cx, cy, r * .97, r * kk, rot, a0, a1); g.stroke();
+      g.strokeStyle = css(mixc(c, dark(c, .2), rr())); g.lineWidth = yw;
+      g.beginPath(); g.ellipse(cx, cy, r * .97, r * kk, rot, a0, a1); g.stroke();
+      g.strokeStyle = css(light(c, .35), .5); g.lineWidth = yw * .28; g.setLineDash([yw * .8, yw * .6]);
+      g.beginPath(); g.ellipse(cx, cy, r * .97 - yw * .15, r * kk - yw * .15, rot, a0, a1); g.stroke(); g.setLineDash([]);
+    }
+  }
+  const sg = g.createRadialGradient(cx - r * .38, cy - r * .42, r * .08, cx, cy, r * 1.04);
+  sg.addColorStop(0, 'rgba(255,245,230,.22)'); sg.addColorStop(.45, 'rgba(0,0,0,0)'); sg.addColorStop(1, 'rgba(10,0,0,.55)');
+  g.fillStyle = sg; g.fillRect(cx - r, cy - r, r * 2, r * 2);
+  g.restore();
+  g.save(); g.lineCap = 'round';
+  for (let i = 0; i < 70; i++) {
+    const a = rr() * TAU, p = [cx + Math.cos(a) * r * .97, cy + Math.sin(a) * r * .97], an = a + (rr() - .5) * 1.6, L = 2 + rr() * 7;
+    g.strokeStyle = css(light(c, .2), .4); g.lineWidth = .6;
+    g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(p[0] + Math.cos(an) * L, p[1] + Math.sin(an) * L); g.stroke();
+  }
+  g.restore();
+}
+
+/** Woven felt basket with last years' leftovers and this year's red. */
+const BASKET = { x0: 1434, x1: 1604, y0: 922, y1: 1040, ball: [1516, 912, 46] };
+function drawBasketBack(g) {
+  const { x0, x1, y0 } = BASKET, tan = [196, 152, 96];
+  felt(g, blob(ellipsePts((x0 + x1) / 2, y0, (x1 - x0) / 2, 16, 30)), dark(tan, .45), 'bInside', { shadow: false, ew: 10, ea: .4 });
+  yarnBall(g, 1470, 914, 30, STRIPE_RGB[5], 'blue');
+  yarnBall(g, 1566, 916, 28, STRIPE_RGB[9], 'pink');
+  const [bx, by, br] = BASKET.ball;
+  yarnBall(g, bx, by, br, STRIPE_RGB[15], 'red', { yw: 6.5 });
+}
+function drawBasketFront(g) {
+  const { x0, x1, y0, y1 } = BASKET, tan = [196, 152, 96], cxm = (x0 + x1) / 2;
+  const P = blob([[x0 - 4, y0], [cxm, y0 + 14], [x1 + 4, y0], [x1 - 10, y1 - 10], [cxm, y1 + 4], [x0 + 10, y1 - 10]], 8);
+  const B = felt(g, P, tan, 'basket', {
+    sx: 6, sy: 10, sb: 8, sa: .5, ew: 16, ea: .55,
+    inner: (gg) => {
+      // woven felt strips: over-under
+      const rows = 6, cols = 9;
+      for (let rI = 0; rI < rows; rI++) for (let cI = 0; cI < cols; cI++) {
+        const y = y0 + 8 + rI * 19, x = x0 - 6 + cI * 20.5;
+        const over = (rI + cI) % 2 === 0;
+        gg.fillStyle = css(over ? light(tan, .12) : dark(tan, .22)); gg.fillRect(x, y, 20.5, 19);
+        gg.fillStyle = 'rgba(40,20,5,.35)'; gg.fillRect(x, y + (over ? 16 : 0), 20.5, 3);
+        gg.fillRect(x + (over ? 0 : 17.5), y, 3, 19);
+      }
+    },
+  });
+  felt(g, blob([[x0 - 10, y0 - 6], [cxm, y0 + 8], [x1 + 10, y0 - 6], [x1 + 8, y0 + 8], [cxm, y0 + 24], [x0 - 8, y0 + 8]], 8), dark(tan, .1), 'bRim', { sy: 5, ew: 8, ea: .5 });
+  running(g, open([[x0 - 2, y0 + 3], [cxm, y0 + 17], [x1 + 2, y0 + 3]]), light(tan, .35), { len: 6, gap: 4, w: 1.6, key: 'rim' });
+  void B;
+}
+
+/* ── 11. People: shared felt-doll parts ───────────────────────────────────── */
+const SKINTEX = { fib: .42, mot: .06 };
+const THR = { eye: [34, 20, 16], mouth: [140, 50, 46], gold: [212, 166, 66], wire: [150, 126, 84] };
+
+/** Convex hull-ish capsule from a (radius ra) to b (radius rb). */
+function capsule(a, b, ra, rb, n = 12) {
+  const d = vnorm(vsub(b, a)), nn = [-d[1], d[0]], pts = [];
+  const at = (c, r, t) => [c[0] + r * (Math.cos(t) * d[0] + Math.sin(t) * nn[0]), c[1] + r * (Math.cos(t) * d[1] + Math.sin(t) * nn[1])];
+  for (let i = 0; i <= n; i++) pts.push(at(b, rb, -Math.PI / 2 + i / n * Math.PI));
+  for (let i = 0; i <= n; i++) pts.push(at(a, ra, Math.PI / 2 + i / n * Math.PI));
+  return pts;
+}
+/** Local frame for a head: normalised face coords (x ∈ ±.5 of w, y ∈ ±.5 of h). */
+function headFrame(o) {
+  const { x, y, w, h, rot = 0 } = o;
+  const T = pts => rotPts(pts.map(([px, py]) => [x + px * w, y + py * h]), x, y, rot);
+  return { T, P: (px, py) => T([[px, py]])[0] };
+}
+const FACE_OUTLINE = [[0, -.5], [.37, -.43], [.5, -.13], [.48, .13], [.39, .34], [.21, .475], [0, .51], [-.21, .475], [-.39, .34], [-.48, .13], [-.5, -.13], [-.37, -.43]];
+
+function ears(g, o) {
+  const { T } = headFrame(o);
+  for (const s of (o.ears || [-1, 1])) {
+    const E = T(blob([[s * .43, -.04], [s * .53, -.06], [s * .565, .06], [s * .53, .17], [s * .45, .17]], 6));
+    felt(g, E, dark(o.skin, .06), o.key + 'ear' + s, { sx: 2, sy: 4, sb: 4, ew: 6, ea: .4, stray: .3, ...SKINTEX });
+    backstitch(g, T(open([[s * .5, -.01], [s * .535, .06], [s * .5, .12]], 4)), dark(o.skin, .4), { len: 4, w: 1.1 });
+  }
+}
+function earring(g, o, s, kind) {
+  const { P } = headFrame(o), p = P(s * .52, .2);
+  if (kind === 'stud') knot(g, p[0], p[1], 3.3, THR.gold, o.key + 'stud' + s);
+  else running(g, ellipsePts(p[0], p[1] + 8, 7, 8, 24), THR.gold, { closed: true, len: 5, gap: .5, w: 1.6, key: o.key + 'hoop' + s });
+}
+
+/** The face: felt oval with blush, French-knot eyes and stitched features. */
+function face(g, o) {
+  const { skin, key, w } = o, { T, P } = headFrame(o), sx = (o.turn || 0) * .08, lk = o.look || [0, 0];
+  const F = felt(g, T(blob(FACE_OUTLINE, 8)), skin, key + 'face', { sx: 3, sy: 5, sb: 6, sa: .38, ew: 16, eb: 9, ea: .34, hl: .18, stray: .3, ...SKINTEX });
+  // blush: small felt circles
+  for (const s of [-1, 1]) {
+    const c = P(s * .29 + sx * .8, .22), r = .082 * w;
+    felt(g, ellipsePts(c[0], c[1], r, r * .9, 28), mixc(skin, [236, 118, 122], .5), key + 'blush' + s, { sx: 1, sy: 1.5, sb: 2, sa: .22, ew: 5, eb: 3, ea: .25, wob: .5, hl: .1, stray: .2 });
+  }
+  const eyeT = dark(THR.eye, 0), lidT = THR.eye;
+  for (const s of [-1, 1]) {
+    const ex = s * .2 + sx, ey = .05;
+    // brows
+    const bc = o.browCol || [60, 40, 30], by = -.115 + (o.browLift || 0);
+    backstitch(g, T(open([[ex - .075, by + .018], [ex, by - .012], [ex + .075, by + .014]], 5)), bc, { len: 5, w: 2 });
+    // eye: French knot, with a soft upper lash line
+    const e = P(ex + lk[0] / w, ey + lk[1] / o.h);
+    knot(g, e[0], e[1], .05 * w, eyeT, key + 'eye' + s);
+    backstitch(g, T(open([[ex - .082, ey - .005], [ex - .02, ey - .058], [ex + .05, ey - .052], [ex + .09, ey - .01]], 5)), lidT, { len: 4.5, w: 1.5 });
+    if (o.lash) stitch(g, P(ex + s * .085, ey - .012), P(ex + s * .115, ey - .04), lidT, 1.3);
+    if (o.age === 'old') {
+      backstitch(g, T(open([[ex + s * .1, ey + .02], [ex + s * .16, ey - .01]], 3)), dark(skin, .3), { len: 4, w: 1.1, sa: .15 });
+      backstitch(g, T(open([[ex + s * .1, ey + .05], [ex + s * .16, ey + .07]], 3)), dark(skin, .3), { len: 4, w: 1.1, sa: .15 });
+      backstitch(g, T(open([[ex - .06, ey + .075], [ex, ey + .095], [ex + .06, ey + .075]], 4)), dark(skin, .25), { len: 4, w: 1.1, sa: .15 });
+    }
+  }
+  // nose and smile
+  backstitch(g, T(open([[sx * 1.5 - .035, .185], [sx * 1.5, .215], [sx * 1.5 + .035, .185]], 4)), dark(skin, .42), { len: 4, w: 1.6 });
+  const mw = .1 * (o.smile || 1), my = .31;
+  if (o.open) {
+    const M = T(blob([[sx - mw * 1.05, my - .01], [sx, my + .005], [sx + mw * 1.05, my - .01], [sx + mw * .6, my + .06], [sx, my + .085], [sx - mw * .6, my + .06]], 6));
+    felt(g, M, [122, 42, 42], key + 'mouth', { sx: 1, sy: 1.5, sb: 2, sa: .2, ew: 4, eb: 2, ea: .3, wob: .3, hl: 0, stray: 0 });
+    felt(g, T(blob([[sx - mw * .55, my + .045], [sx, my + .035], [sx + mw * .55, my + .045], [sx, my + .08]], 5)), [214, 110, 110], key + 'tongue', { shadow: false, ew: 3, eb: 2, ea: .25, wob: .2, stray: 0, hl: 0 });
+  } else {
+    backstitch(g, T(open([[sx - mw - .015, my - .018], [sx - mw, my], [sx, my + .045], [sx + mw, my], [sx + mw + .015, my - .018]], 6)), THR.mouth, { len: 5, w: 2 });
+  }
+  if (o.age === 'old') {
+    for (const s of [-1, 1]) backstitch(g, T(open([[sx + s * .12, .2], [sx + s * .155, .27], [sx + s * .15, .33]], 4)), dark(skin, .28), { len: 4, w: 1.1, sa: .15 });
+    for (const fy of [-.25, -.29]) backstitch(g, T(open([[-.15, fy + .01], [0, fy - .006], [.15, fy + .01]], 5)), dark(skin, .2), { len: 5, w: 1, sa: .12 });
+  }
+  if (o.glasses) {
+    const rx = .128, ry = .128 * w / o.h;
+    for (const s of [-1, 1]) {
+      const c = P(s * .2 + sx, .05);
+      const rim = ellipsePts(0, 0, rx * w, ry * o.h, 40).map(([px, py]) => rotP([c[0] + px, c[1] + py], c[0], c[1], o.rot || 0));
+      running(g, rim, THR.wire, { closed: true, len: 5, gap: .3, w: 1.6, key: key + 'rim' + s });
+      g.save(); g.strokeStyle = 'rgba(255,255,250,.55)'; g.lineWidth = 1.6; g.lineCap = 'round';
+      g.beginPath(); g.arc(c[0], c[1], rx * w * .72, Math.PI * 1.1, Math.PI * 1.45); g.stroke(); g.restore();
+      backstitch(g, T(open([[s * (.2 + rx) + sx, .03], [s * .5, .0]], 3)), THR.wire, { len: 6, w: 1.4 });
+    }
+    backstitch(g, T(open([[-.2 + rx + sx, .04], [sx, .015], [.2 - rx + sx, .04]], 4)), THR.wire, { len: 4, w: 1.5 });
+  }
+  return F;
+}
+
+/** A felt hand seen from the back: mitten palm with stitched fingers + thumb.
+ *  at = wrist, ang = direction wrist→fingertips, ts = thumb side (±1). */
+function hand(g, o) {
+  const { at, ang, L, W, skin, key } = o, ts = o.ts ?? 1, c = Math.cos(ang), s = Math.sin(ang);
+  const M = ([px, py]) => [at[0] + px * c - py * s, at[1] + px * s + py * c];
+  const fl = o.fl ?? 1;
+  const palm = blob([[-.05 * L, -.4 * W], [.3 * L, -.52 * W], [.6 * L, -.54 * W], [(.62 + .2 * fl) * L, -.5 * W], [(.62 + .35 * fl) * L, -.3 * W], [(.62 + .38 * fl) * L, -.04 * W], [(.62 + .36 * fl) * L, .22 * W], [(.62 + .25 * fl) * L, .44 * W], [.6 * L, .53 * W], [.3 * L, .5 * W], [-.05 * L, .4 * W]], 6).map(M);
+  const tbase = [.24 * L, ts * .34 * W], ta = ts * (o.ta ?? .75), tl = (o.tl ?? .48) * L;
+  const tip = [tbase[0] + Math.cos(ta) * tl, tbase[1] + Math.sin(ta) * tl];
+  const thumb = capsule(tbase, tip, .2 * W, .15 * W).map(M);
+  const sk = { sx: 2, sy: 4, sb: 4, sa: .38, ew: 9, eb: 5, ea: .38, hl: .14, stray: .3, ...SKINTEX };
+  if (o.thumbBehind) felt(g, thumb, dark(skin, .05), key + 'thumb', sk);
+  felt(g, palm, skin, key + 'palm', sk);
+  if (!o.thumbBehind) felt(g, thumb, skin, key + 'thumb', { ...sk, sx: 1.5, sy: 2.5, sb: 3 });
+  for (const fy of [-.25, 0, .25]) {
+    const x1 = (.62 + (.36 - Math.abs(fy) * .35) * fl) * L;
+    backstitch(g, [M([x1 - .03 * L, fy * W]), M([x1 - .3 * L * fl, fy * W * .92])], dark(skin, .42), { len: 5, w: 1.2 });
+  }
+  if (o.knuckles) for (const fy of [-.25, 0, .25]) backstitch(g, open([M([.55 * L, fy * W - .07 * W]), M([.58 * L, fy * W]), M([.55 * L, fy * W + .07 * W])], 3), dark(skin, .3), { len: 3, w: 1, sa: .12 });
+}
+
+/** A foot in a chappal, seen from the front (toes toward us). */
+function foot(g, cx, cy, skin, key, o = {}) {
+  const rot = o.rot || 0, k = o.s || 1, T = pts => rotPts(pts.map(([px, py]) => [cx + px * k, cy + py * k]), cx, cy, rot);
+  felt(g, T(blob([[-30, 4], [0, 0], [30, 4], [33, 16], [0, 24], [-33, 16]], 6)), o.sole || [112, 72, 44], key + 'sole', { sx: 2, sy: 4, sb: 4, sa: .45, ew: 6, ea: .45 });
+  felt(g, T(blob([[-15, -24], [15, -24], [22, -4], [27, 12], [0, 17], [-27, 12], [-22, -4]], 6)), skin, key + 'foot', { sx: 1, sy: 3, sb: 3, ew: 8, ea: .35, ...SKINTEX });
+  for (const tx of [-15, -5, 5, 15]) backstitch(g, T([[tx * 1.05, 16 - Math.abs(tx) * .15], [tx, 9 - Math.abs(tx) * .15]]), dark(skin, .45), { len: 4, w: 1.2 });
+  felt(g, T(rrect(-23, -9, 46, 11, 5)), o.strap || [156, 96, 52], key + 'strap', { sx: 1, sy: 2, sb: 2, ew: 4, ea: .4, wob: .4 });
+}
+
+/** Many soft yarn strands following guide curves, coloured from a palette. */
+function hairStrands(g, guides, pal, w, key, interleave) {
+  const r = rngFor('hair:' + key);
+  for (let i = 0; i < guides.length; i++) {
+    const c = interleave ? pal[(i * 7 + Math.floor(r() * 2)) % pal.length] : pal[Math.floor(r() * pal.length)];
+    strand(g, guides[i].map(([x, y]) => [x + (r() - .5) * 1.2, y + (r() - .5) * 1.2]), c, w * (.85 + r() * .3), { sa: .35 });
+  }
+}
+/** A few loose hairs escaping at the crown. */
+function flyaways(g, o, pal, key) {
+  const { T } = headFrame(o), r = rngFor('fly:' + key);
+  for (let i = 0; i < 7; i++) {
+    const a = -.5 + r() * 1, x0 = a * .5, y0 = -.6 + Math.abs(a) * .2;
+    strand(g, T([[x0, y0 + .04], [x0 + a * .08 + (r() - .5) * .05, y0 - .03], [x0 + a * .14 + (r() - .5) * .08, y0 - .05 - r() * .03]]), pal[i % pal.length], 1.1, { shadow: false, hi: .2 });
+  }
+}
+
+/* ── 12. The three women ──────────────────────────────────────────────────────
+   Each is drawn in phases so the scarf can pass over laps and under hands:
+   back (hair/shawl behind) → body (legs, lap, torso, head) → [scarf] → arms
+   (forearms and hands over the scarf) → over (shawl front, needles). */
+const HAIR = {
+  white: [[244, 242, 236], [226, 223, 216], [204, 200, 194], [184, 180, 174]],
+  salt: [[60, 52, 48], [76, 68, 62], [96, 88, 82], [150, 146, 140], [194, 190, 184]],
+  dark: [[40, 30, 26], [52, 40, 34], [66, 50, 42], [92, 70, 58]],
+};
+HAIR.saltMix = [HAIR.salt[0], HAIR.salt[0], HAIR.salt[1], HAIR.salt[1], HAIR.salt[2], HAIR.salt[0], HAIR.salt[1], HAIR.salt[3], HAIR.salt[0], HAIR.salt[2], HAIR.salt[4]];
+/** Strands for hair combed from a parting at x = px, in head-normalised coords. */
+function combGuides(o, side, n, px, reach, drop) {
+  const { T } = headFrame(o), out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1), s = side;
+    out.push(T([[px + s * .01, -.34 - .26 * t], [px + s * (.2 + .08 * t), -.335 - .22 * t], [s * (.38 + .1 * t) + px * .3, -.22 - .17 * t],
+      [s * (reach + .04 * t), -.04 - .12 * t + drop * (1 - t)], [s * (reach + .02), .05 - .1 * t + drop * 1.4 * (1 - t)]]));
+  }
+  return out;
+}
+function hairCap(o, pts, col, key) {
+  const { T } = headFrame(o);
+  return felt(g0, T(blob(pts, 8)), col, key, { sx: 2, sy: 5, sb: 6, sa: .4, ew: 12, eb: 7, ea: .4, hl: .12, stray: 1.5 });
+}
+let g0 = null; // the main context, set in draw()
+
+/** A three-strand plait along a path, lobes alternating. */
+function plait(g, path, w0, w1, pal, key) {
+  const n = 9, r = rngFor('plait:' + key);
+  for (let k = 0; k < n; k++) {
+    const u = (k + .5) / n, p = along(path, u), q = along(path, Math.min(1, u + .02)), t = vnorm(vsub(q, p)), nn = [-t[1], t[0]];
+    const w = lerp(w0, w1, u), s = k % 2 ? 1 : -1, c = vadd(p, vmul(nn, s * w * .16)), an = Math.atan2(t[1], t[0]) + s * .62;
+    const L = felt(g, ellipsePts(c[0], c[1], w * .56, w * .3, 24, an), pal[1], key + 'lobe' + k, { sx: 1.5, sy: 3, sb: 3, sa: .4, ew: 8, eb: 4, ea: .5, wob: .5, stray: .6 });
+    for (let j = -1; j <= 1; j++) {
+      const off = [Math.cos(an + Math.PI / 2) * j * w * .12, Math.sin(an + Math.PI / 2) * j * w * .12];
+      const a = [c[0] - Math.cos(an) * w * .46 + off[0], c[1] - Math.sin(an) * w * .46 + off[1]], b = [c[0] + Math.cos(an) * w * .46 + off[0], c[1] + Math.sin(an) * w * .46 + off[1]];
+      strand(g, [a, vadd(vlerp(a, b, .5), vmul(nn, s * 1.5)), b], pal[Math.floor(r() * pal.length)], 2.4, { shadow: false });
+    }
+    void L;
+  }
+  const end = along(path, 1), pre = along(path, .96), t = vnorm(vsub(end, pre)), nn = [-t[1], t[0]];
+  for (let j = -3; j <= 3; j++) strand(g, [end, vadd(end, vadd(vmul(t, 10), vmul(nn, j * 1.5))), vadd(end, vadd(vmul(t, 22 + Math.abs(j)), vmul(nn, j * 3.2)))], pal[(j + 3) % pal.length], 2.2, {});
+  for (let j = 0; j < 4; j++) { const a = vadd(end, vmul(t, -4 + j * 2.2)); stitch(g, vadd(a, vmul(nn, -w1 * .32)), vadd(a, vmul(nn, w1 * .32)), [196, 60, 50], 2); }
+}
+
+
+/** Seated lap seen from the front: thighs as a band, knees as two bumps. */
+function lapShape(cx, y0, hw, kl, kr, ky, r) {
+  return blob([[cx - hw, y0], [cx + hw, y0], [cx + hw + 6, y0 + 32], [kr + r, ky - 10], [kr + r * .55, ky + r * .3], [kr, ky + r * .42], [kr - r * .6, ky + r * .28],
+    [cx + 2, ky - 4], [kl + r * .6, ky + r * .28], [kl, ky + r * .42], [kl - r * .55, ky + r * .3], [kl - r, ky - 10], [cx - hw - 6, y0 + 32]], 8);
+}
+/** Neck plus the upper chest a neckline reveals. */
+function neckChest(g, x, yTop, yBase, rw, cw, skin, key) {
+  felt(g, capsule([x, yTop], [x, yBase], rw, rw + 2), dark(skin, .1), key + 'Neck', { sx: 2, sy: 4, ew: 10, ea: .45, ...SKINTEX });
+  felt(g, blob([[x - rw - 2, yBase - 16], [x + rw + 2, yBase - 16], [x + cw, yBase + 10], [x + cw, yBase + 40], [x - cw, yBase + 40], [x - cw, yBase + 10]], 6), dark(skin, .04), key + 'Chest', { shadow: false, ew: 10, ea: .35, stray: 0, ...SKINTEX });
+}
+
+/* ── Grandmother, 95: small and bent, white bun, round wire glasses ─────────── */
+const GM = {
+  skin: [212, 166, 128], sari: [244, 238, 224], border: [148, 36, 46], shawl: [140, 158, 118],
+  head: { x: 628, y: 374, w: 102, h: 118, rot: .13, key: 'gm' },
+  back(g) {
+    const o = { ...this.head, skin: this.skin }, { T, P } = headFrame(o);
+    felt(g, blob([[504, 492], [516, 452], [552, 424], [608, 410], [668, 412], [708, 432], [726, 474], [712, 506], [510, 508]], 8), dark(this.shawl, .08), 'gmHump', { sx: 4, sy: 7, sb: 8, sa: .4, ew: 16, ea: .5 });
+    const b = P(.1, -.6), br = .25 * o.w;
+    felt(g, ellipsePts(b[0], b[1], br, br * .92, 30), HAIR.white[2], 'gmBun', { sx: 2, sy: 4, sb: 5, ew: 9, ea: .4 });
+    const sp = []; for (let t = 0; t < 1; t += .004) { const a = t * TAU * 3.2, rr = br * (.95 - .85 * t); sp.push([b[0] + Math.cos(a) * rr, b[1] + Math.sin(a) * rr * .92]); }
+    for (let k = 0; k < 4; k++) strand(g, sp.slice(k * 55, k * 55 + 150), HAIR.white[k % 4], 3.2, {});
+    stitch(g, [b[0] + br * .4, b[1] - br * .9], [b[0] + br * 1.1, b[1] - br * .2], THR.gold, 2.2);
+    void T;
+  },
+  body(g) {
+    const o = { ...this.head, skin: this.skin, key: 'gm' };
+    foot(g, 578, 936, this.skin, 'gmFL', { s: .86, rot: .12 });
+    foot(g, 648, 936, this.skin, 'gmFR', { s: .86, rot: -.1 });
+    // the sari falls from the knees to the floor, pleats in front
+    const drape = blob([[524, 712], [700, 712], [708, 800], [714, 884], [708, 914], [612, 922], [516, 914], [510, 884], [516, 800]], 8);
+    const D = felt(g, drape, dark(this.sari, .1), 'gmDrape', { sx: 3, sy: 6, sb: 7, sa: .38, ew: 16, ea: .45, hl: .06,
+      inner: (gg) => { const gr = gg.createLinearGradient(0, 712, 0, 790); gr.addColorStop(0, 'rgba(70,45,25,.34)'); gr.addColorStop(1, 'rgba(70,45,25,0)'); gg.fillStyle = gr; gg.fillRect(480, 700, 260, 100); } });
+    g.save(); g.clip(D.path);
+    felt(g, blob([[498, 886], [612, 896], [724, 886], [724, 936], [498, 936]], 6), this.border, 'gmHem', { shadow: false, ew: 6, ea: .4, wob: .6, stray: 0 });
+    g.restore();
+    running(g, open([[512, 884], [612, 893], [712, 884]]), THR.gold, { len: 6, gap: 3, w: 1.6, key: 'gmHemGold' });
+    for (let i = 0; i < 5; i++) { const x = 590 + i * 10; running(g, open([[x + 1, 752], [x - 1 + i * .6, 820], [x - 3 + i * 1.2, 884]]), dark(this.sari, .25), { len: 7, gap: 5, w: 1.3, key: 'pleat' + i }); }
+    for (const [x0, x1] of [[540, 530], [684, 694]]) running(g, open([[x0, 752], [(x0 + x1) / 2, 820], [x1, 880]]), dark(this.sari, .22), { len: 7, gap: 5, w: 1.3, key: 'gmSide' + x0 });
+    const rb = rngFor('gmButtas');
+    for (let i = 0; i < 16; i++) { const x = 524 + rb() * 176, y = 770 + rb() * 100; if (x > 582 && x < 646) continue; knot(g, x, y, 2.3, this.border, 'bt' + i); }
+    // lap and knees, level with the seat's front edge
+    felt(g, lapShape(612, 610, 100, 570, 654, 712, 44), light(this.sari, .3), 'gmLap', { sx: 3, sy: 9, sb: 8, sa: .55, ew: 14, ea: .34, hl: .2 });
+    for (const kx of [570, 654]) running(g, open([[kx - 30, 718], [kx, 728], [kx + 30, 718]], 6), dark(this.sari, .2), { len: 6, gap: 4, w: 1.3, key: 'gmKnee' + kx });
+    felt(g, blob([[528, 462], [690, 458], [702, 560], [708, 652], [516, 654], [520, 560]], 8), this.sari, 'gmTorso', { sx: 2, sy: 5, sb: 6, ew: 12, ea: .35 });
+    felt(g, [[640, 470], [676, 470], [596, 660], [556, 660]], this.border, 'gmPallu', { sx: 1, sy: 2, sb: 2, ew: 5, ea: .35, wob: .5 });
+    running(g, [[668, 474], [584, 660]], THR.gold, { len: 6, gap: 3, w: 1.5, key: 'palluGold' });
+    felt(g, capsule([624, 416], [620, 476], 21, 23), dark(this.skin, .1), 'gmNeck', { sx: 1, sy: 3, ew: 8, ea: .4, ...SKINTEX });
+    ears(g, { ...o, ears: [-1, 1] });
+    earring(g, o, -1, 'stud'); earring(g, o, 1, 'stud');
+    face(g, { ...o, turn: .35, look: [4, 4], smile: 1.15, age: 'old', glasses: true, browCol: [200, 196, 190], browLift: -.01 });
+    hairCap(o, [[-.52, .0], [-.55, -.25], [-.44, -.46], [-.2, -.58], [0, -.6], [.22, -.58], [.46, -.45], [.55, -.22], [.52, .0], [.45, -.08], [.38, -.22], [.2, -.32], [0, -.345], [-.2, -.32], [-.38, -.22], [-.46, -.08]], HAIR.white[1], 'gmCap');
+    hairStrands(g, combGuides(o, -1, 16, 0, .48, .06), HAIR.white, 3, 'gmL');
+    hairStrands(g, combGuides(o, 1, 16, 0, .48, .06), HAIR.white, 3, 'gmR');
+  },
+  arms(g) {
+    for (const [e, w, key] of [[[524, 572], [554, 628], 'L'], [[700, 574], [668, 632], 'R']]) {
+      felt(g, capsule(e, w, 18, 14), this.skin, 'gmFore' + key, { ...SKINTEX, sx: 2, sy: 4, sb: 5, ew: 9, ea: .38 });
+      const d = vnorm(vsub(w, e)), nn = [-d[1], d[0]];
+      for (let k = 0; k < 2; k++) {
+        const c = vadd(w, vmul(d, -4 - k * 5));
+        running(g, [vadd(c, vmul(nn, -14)), vadd(c, vmul(nn, 14))], THR.gold, { len: 30, gap: 0, w: 2.2, key: 'bangle' + key + k });
+      }
+    }
+    hand(g, { at: [552, 624], ang: 1.25, L: 62, W: 39, skin: this.skin, ts: -1, key: 'gmHL', knuckles: true, ta: .6 });
+    hand(g, { at: [668, 628], ang: 1.88, L: 62, W: 39, skin: this.skin, ts: 1, key: 'gmHR', knuckles: true, ta: .6 });
+  },
+  over(g) {
+    const sh = this.shawl, sk = { sx: 4, sy: 7, sb: 8, sa: .42, ew: 16, ea: .45, hl: .14 };
+    const Lp = blob([[500, 506], [516, 466], [560, 446], [604, 452], [594, 520], [584, 572], [572, 604], [536, 596], [502, 590]], 8);
+    const Rp = blob([[652, 452], [694, 446], [732, 470], [740, 510], [734, 588], [700, 598], [668, 604], [658, 572], [656, 520]], 8);
+    for (const [P, k, bot] of [[Lp, 'L', [[504, 588], [538, 594], [572, 602]]], [Rp, 'R', [[668, 602], [702, 596], [736, 586]]]]) {
+      const S = felt(g, P, sh, 'shawl' + k, sk);
+      running(g, cutEdge(P, 'shs' + k, 1).map(([x, y]) => [lerp(x, k === 'L' ? 552 : 698, .14), lerp(y, 526, .14)]), [232, 222, 196], { closed: true, len: 7, gap: 5, w: 1.6, key: 'shIn' + k });
+      const fr = rngFor('shfr' + k), edge = resample(open(bot, 8), 5);
+      for (const p of edge) strand(g, [p, [p[0] + (fr() - .5) * 4, p[1] + 9], [p[0] + (fr() - .5) * 6, p[1] + 17 + fr() * 5]], dark(sh, .1 + fr() * .15), 2.2, { sa: .3 });
+      void S;
+    }
+  },
+};
+
+/* ── Mother, ~60: greying plait, green salwar kameez ────────────────────────── */
+const MO = {
+  skin: [196, 140, 98], kameez: [44, 112, 88], salwar: [236, 222, 196],
+  head: { x: 953, y: 300, w: 110, h: 124, rot: -.09, key: 'mo' },
+  back(g) {
+    const o = { ...this.head, skin: this.skin }, { T } = headFrame(o);
+    felt(g, T(blob([[-.56, .1], [-.58, -.2], [-.48, -.46], [0, -.62], [.48, -.46], [.58, -.2], [.56, .1], [.44, .3], [-.44, .3]], 8)), HAIR.salt[0], 'moBackHair', { sx: 3, sy: 6, sb: 7, ew: 12, ea: .45 });
+  },
+  body(g) {
+    const o = { ...this.head, skin: this.skin, key: 'mo' };
+    for (const [kx, ax, key] of [[902, 906, 'L'], [1018, 1014, 'R']]) {
+      felt(g, blob([[kx - 33, 730], [kx + 33, 730], [kx + 35, 790], [ax + 30, 862], [ax + 24, 890], [ax - 24, 890], [ax - 30, 862], [kx - 35, 790]], 8), this.salwar, 'moLeg' + key, { sx: 3, sy: 6, sb: 6, ew: 12, ea: .38 });
+      running(g, open([[kx - 8, 776], [kx - 12, 820], [ax - 6, 866]]), dark(this.salwar, .25), { len: 7, gap: 5, w: 1.3, key: 'moLegF' + key });
+    }
+    foot(g, 904, 926, this.skin, 'moFL', { rot: .14 });
+    foot(g, 1016, 926, this.skin, 'moFR', { rot: -.14 });
+    for (const [ax, key] of [[906, 'L'], [1014, 'R']]) felt(g, rrect(ax - 27, 878, 54, 18, 7), this.kameez, 'moCuff' + key, { sy: 3, ew: 5 });
+    felt(g, lapShape(960, 606, 100, 900, 1020, 718, 42), this.salwar, 'moLap', { sx: 3, sy: 6, sb: 6, ew: 12, ea: .35 });
+    neckChest(g, 954, 350, 406, 31, 46, this.skin, 'mo');
+    const torso = [[846, 434], [872, 414], [912, 402], [922, 406], [932, 422], [954, 431], [976, 422], [986, 406], [996, 402], [1036, 414], [1062, 434], [1070, 464], [1066, 512], [1054, 560], [1054, 596], [1062, 626], [1060, 650], [960, 656], [860, 650], [858, 626], [866, 596], [866, 560], [854, 512], [848, 464]];
+    const K = felt(g, blob(torso, 6), this.kameez, 'moKameez', { sx: 4, sy: 7, sb: 8, sa: .4, ew: 18, eb: 9, ea: .5, hl: .12 });
+    running(g, open([[914, 408], [930, 426], [954, 436], [978, 426], [994, 408]], 6), THR.gold, { len: 6, gap: 3, w: 1.8, key: 'moNeckTrim' });
+    for (let i = 0; i < 9; i++) { const a = Math.PI * (.12 + .76 * i / 8), p = [954 - Math.cos(a) * 52, 412 + Math.sin(a) * 36]; knot(g, p[0], p[1], 2.8, THR.gold, 'moYoke' + i); }
+    running(g, [[954, 440], [954, 526]], THR.gold, { len: 5, gap: 4, w: 1.6, key: 'moPlacket' });
+    
+    void K;
+    const panel = felt(g, lapShape(960, 608, 96, 900, 1020, 728, 44), dark(this.kameez, .04), 'moPanel', { sx: 3, sy: 6, sb: 7, ew: 14, ea: .5, hl: .16 });
+    running(g, open([[862, 708], [900, 742], [960, 730], [1020, 742], [1058, 708]], 8), THR.gold, { len: 6, gap: 3, w: 1.7, key: 'moPanelHem' });
+    void panel;
+    plait(g, open([[990, 376], [1000, 420], [1003, 464], [1000, 506], [994, 538]], 8), 30, 22, HAIR.salt, 'moPlait');
+    ears(g, { ...o, ears: [-1, 1] });
+    earring(g, o, -1, 'stud'); earring(g, o, 1, 'stud');
+    face(g, { ...o, turn: -.25, look: [-5.5, 2.5], smile: 1.1, age: 'mid', browCol: HAIR.salt[1], lash: true });
+    hairCap(o, [[-.52, .02], [-.57, -.25], [-.47, -.5], [-.2, -.64], [0, -.665], [.22, -.64], [.48, -.49], [.57, -.23], [.53, .02], [.46, -.06], [.38, -.22], [.2, -.33], [0, -.35], [-.2, -.33], [-.38, -.22], [-.46, -.06]], HAIR.salt[1], 'moCap');
+    hairStrands(g, combGuides(o, -1, 30, 0, .5, .08), HAIR.saltMix, 2.3, 'moL', true);
+    hairStrands(g, combGuides(o, 1, 30, 0, .5, .08), HAIR.saltMix, 2.3, 'moR', true);
+    flyaways(g, o, HAIR.salt, 'moFly');
+  },
+  arms(g) {
+    const kz = this.kameez;
+    const arm = (sh, el, wr, key) => {
+      felt(g, capsule(el, wr, 21, 16), this.skin, 'moFore' + key, { ...SKINTEX, sx: 2, sy: 5, sb: 5, ew: 10, ea: .4 });
+      felt(g, capsule(sh, el, 26, 23), kz, 'moSleeveU' + key, { sx: 3, sy: 6, sb: 7, ew: 14, ea: .5 });
+      const se = vlerp(el, wr, .42);
+      felt(g, capsule(el, se, 23, 21), dark(kz, .05), 'moSleeveL' + key, { sx: 2, sy: 4, sb: 5, ew: 10, ea: .5 });
+      const d = vnorm(vsub(wr, el)), nn = [-d[1], d[0]], c = vadd(se, vmul(d, 12));
+      running(g, [vadd(c, vmul(nn, -20)), vadd(c, vmul(nn, 20))], THR.gold, { len: 6, gap: 3, w: 1.6, key: 'moCuffT' + key });
+    };
+    arm([868, 448], [844, 560], [896, 612], 'L');
+    arm([1050, 448], [1076, 560], [1024, 614], 'R');
+    hand(g, { at: [898, 606], ang: 1.18, L: 66, W: 42, skin: this.skin, ts: -1, key: 'moHL' });
+    hand(g, { at: [1022, 608], ang: 1.96, L: 66, W: 42, skin: this.skin, ts: 1, key: 'moHR' });
+  },
+};
+
+/* ── Granddaughter, ~25: loose dark hair, t-shirt and jeans, the needles ───── */
+const GD = {
+  skin: [182, 124, 84], tee: [170, 152, 204], jeans: [62, 86, 132],
+  head: { x: 1312, y: 298, w: 106, h: 122, rot: -.14, key: 'gd' },
+  N2: { knob: [1230, 622], tip: [1392, 506] }, N1: { knob: [1424, 624], tip: [1240, 502] },
+  back(g) {
+    const o = { ...this.head, skin: this.skin }, { T } = headFrame(o);
+    felt(g, T(blob([[-.6, -.1], [-.54, -.48], [0, -.66], [.54, -.48], [.62, -.1], [.66, .5], [.7, 1.05], [.42, 1.12], [-.42, 1.1], [-.66, 1.0], [-.62, .45]], 8)), HAIR.dark[1], 'gdBackHair', { sx: 3, sy: 6, sb: 7, ew: 14, ea: .5 });
+  },
+  body(g) {
+    const o = { ...this.head, skin: this.skin, key: 'gd' };
+    for (const [kx, ax, key] of [[1276, 1274, 'L'], [1366, 1370, 'R']]) {
+      felt(g, blob([[kx - 31, 730], [kx + 31, 730], [kx + 30, 790], [ax + 25, 862], [ax + 22, 892], [ax - 22, 892], [ax - 25, 862], [kx - 30, 790]], 8), this.jeans, 'gdLeg' + key, { sx: 3, sy: 6, sb: 6, ew: 12, ea: .45 });
+      running(g, open([[kx + (key === 'L' ? -27 : 27), 752], [ax + (key === 'L' ? -21 : 21), 872]]), [214, 150, 60], { len: 6, gap: 4, w: 1.5, key: 'gdSeam' + key });
+      felt(g, rrect(ax - 25, 874, 50, 18, 6), light(this.jeans, .15), 'gdHem' + key, { sy: 3, ew: 5 });
+    }
+    foot(g, 1274, 924, this.skin, 'gdFL', { rot: .12, sole: [70, 70, 76], strap: [96, 140, 136] });
+    foot(g, 1372, 924, this.skin, 'gdFR', { rot: -.12, sole: [70, 70, 76], strap: [96, 140, 136] });
+    const lap = felt(g, lapShape(1320, 606, 104, 1276, 1366, 718, 40), this.jeans, 'gdLap', { sx: 3, sy: 6, sb: 6, ew: 12, ea: .4, hl: .2 });
+    for (const kx of [1276, 1366]) { running(g, open([[kx - 26, 720], [kx, 730], [kx + 26, 720]], 6), light(this.jeans, .3), { len: 5, gap: 4, w: 1.4, key: 'gdKnee' + kx }); running(g, open([[kx - 20, 696], [kx - 4, 706], [kx + 14, 700]], 5), dark(this.jeans, .3), { len: 5, gap: 3, w: 1.3, key: 'gdKneeF' + kx }); }
+    void lap;
+    neckChest(g, 1316, 348, 410, 29, 42, this.skin, 'gd');
+    const tee = [[1206, 436], [1232, 416], [1282, 404], [1292, 410], [1304, 426], [1318, 431], [1332, 426], [1344, 410], [1354, 404], [1404, 416], [1430, 436], [1436, 468], [1426, 526], [1420, 588], [1426, 652], [1320, 662], [1214, 652], [1220, 588], [1214, 526], [1204, 468]];
+    felt(g, blob(tee, 6), this.tee, 'gdTee', { sx: 4, sy: 7, sb: 8, sa: .4, ew: 18, eb: 9, ea: .45, hl: .12 });
+    felt(g, taper(open([[1282, 404], [1300, 424], [1318, 431], [1336, 424], [1354, 404]], 6), () => 5), dark(this.tee, .12), 'gdCollar', { sx: 1, sy: 2, sb: 2, ew: 4, ea: .35, wob: .3 });
+    running(g, open([[1286, 410], [1302, 427], [1318, 434], [1334, 427], [1350, 410]], 6), light(this.tee, .4), { len: 5, gap: 3, w: 1.3, key: 'gdCollarS' });
+    const pk = felt(g, rrect(1352, 458, 40, 44, 5), dark(this.tee, .06), 'gdPocket', { sx: 1.5, sy: 3, sb: 3, ew: 6, ea: .35, wob: .5 });
+    running(g, [[1356, 464], [1356, 498], [1388, 498], [1388, 464]], light(this.tee, .35), { len: 4, gap: 3, w: 1.2, key: 'gdPocketS' });
+    void pk;
+    ears(g, { ...o, ears: [-1] });
+    earring(g, o, -1, 'hoop');
+    face(g, { ...o, turn: -.3, look: [-6, 2], smile: 1.25, age: 'young', browCol: HAIR.dark[0], lash: true });
+    const cap = [[-.47, -.02], [-.52, -.3], [-.42, -.5], [-.14, -.62], [.22, -.6], [.48, -.44], [.58, -.12], [.6, .25], [.64, .62], [.7, .98], [.54, 1.02], [.47, .6], [.45, .2], [.42, -.06], [.34, -.2], [.16, -.3], [-.02, -.34], [-.14, -.33], [-.3, -.28], [-.42, -.16]];
+    hairCap(o, cap, HAIR.dark[1], 'gdCap');
+    const { T } = headFrame(o), gl = [];
+    for (let i = 0; i < 22; i++) {
+      const t = i / 21;
+      gl.push(T([[-.14 + .01, -.34 - .26 * t], [.08, -.35 - .22 * t], [.32, -.26 - .19 * t], [.46 + .06 * t, -.06 - .1 * t], [.5 + .08 * t, .3], [.58 + .08 * t, .7 - .1 * t], [.62 + .06 * t, .98 - .2 * t]]));
+    }
+    for (let i = 0; i < 12; i++) { const t = i / 11; gl.push(T([[-.15, -.34 - .26 * t], [-.3, -.3 - .2 * t], [-.43, -.18 - .16 * t], [-.49, -.02 - .1 * t]])); }
+    hairStrands(g, gl, HAIR.dark, 3.2, 'gdStrands');
+    flyaways(g, o, HAIR.dark, 'gdFly');
+  },
+  arms(g) {
+    const arm = (sh, el, wr, key) => {
+      felt(g, capsule(sh, el, 21, 19), this.skin, 'gdUpper' + key, { ...SKINTEX, sx: 3, sy: 6, sb: 6, ew: 12, ea: .42 });
+      felt(g, capsule(el, wr, 19, 15), this.skin, 'gdFore' + key, { ...SKINTEX, sx: 2, sy: 5, sb: 5, ew: 10, ea: .42 });
+      const sl = vlerp(sh, el, .42);
+      felt(g, capsule(sh, sl, 27, 26), this.tee, 'gdSleeve' + key, { sx: 3, sy: 6, sb: 7, ew: 14, ea: .45 });
+      const d = vnorm(vsub(el, sh)), nn = [-d[1], d[0]], c = vadd(sl, vmul(d, 20));
+      running(g, [vadd(c, vmul(nn, -26)), vadd(c, vmul(nn, 26))], light(this.tee, .4), { len: 5, gap: 3, w: 1.3, key: 'gdSlS' + key });
+    };
+    arm([1224, 450], [1204, 560], [1250, 600], 'L');
+    arm([1414, 450], [1436, 560], [1408, 604], 'R');
+  },
+};
+
+/* ── 13. The scarf across three laps ───────────────────────────────────────── */
+function buildScarf() {
+  const N1 = GD.N1, d1 = vnorm(vsub(N1.tip, N1.knob)), L1 = vlen(vsub(N1.tip, N1.knob));
+  const lo = vadd(N1.knob, vmul(d1, L1 * .13)), hi = vadd(N1.knob, vmul(d1, L1 * .6));
+  const end = vlerp(lo, hi, .5), endW = vlen(vsub(hi, lo)) / 2, tEnd = -d1[1] > 0 ? [-d1[1], d1[0]] : [d1[1], -d1[0]];
+  // centre line: level across each lap, sagging into the gaps between the women
+  const ctrl = [[510, 662], [578, 664], [650, 667], [716, 677], [784, 686], [852, 676], [912, 666], [1000, 664], [1066, 675], [1128, 690],
+    [1190, 690], [1244, 684], vsub(end, vmul(tEnd, 70)), vsub(end, vmul(tEnd, 32)), end];
+  const nz = makeNoise('scarf:tension');
+  let rb = null;
+  const H0 = 70, LAPY = [671, 698], VK = -.72;
+  const sagAt = u => smooth(LAPY[0], LAPY[1], rb.pos(u)[1]);
+  const liftAt = u => smooth(rb.L - 190, rb.L - 90, u);
+  const halfW = u => {
+    if (!rb) return H0;
+    const w = H0 * (1 - .06 * sagAt(u)) * (1 + .03 * nz(u * .045, 3.1));
+    return lerp(w, endW, smooth(rb.L - 170, rb.L - 4, u));
+  };
+  // on a lap the scarf lies on the thighs (seen from above, foreshortened)
+  // and only its front edge curls down over the knees
+  const fold = u => {
+    if (!rb) return [VK, 1, 1];
+    const onLap = (1 - sagAt(u)) * (1 - liftAt(u));
+    return [VK, lerp(.7, .64, onLap) + .26 * liftAt(u), lerp(.9, .8, onLap) + .1 * liftAt(u)];
+  };
+  rb = makeRibbon(ctrl, halfW, fold);
+  const K = { u0: 7, nc: 9 };
+  K.rh = (rb.L - K.u0) / NROWS;
+  const creases = [];
+  for (let u = 20; u < rb.L - 60; u += 2) {
+    const y0 = rb.pos(u - 2)[1], y1 = rb.pos(u)[1];
+    if ((y0 < 720) !== (y1 < 720)) creases.push({ u, slant: y1 > y0 ? 10 : -10 });
+  }
+  const shade = (u, v) => {
+    const sag = sagAt(u), onLap = (1 - sag) * (1 - liftAt(u)), vk = VK;
+    let m = 1, a = 0;
+    a += .06 * onLap * smooth(vk + .1, vk + .5, v);                   // lap face catches the window light
+    a += .1 * onLap * Math.exp(-(((v - vk - .05) / .12) ** 2));       // ridge where it rolls over the knees
+    m *= 1 - .2 * onLap * smooth(vk, -1.02, v);                       // then turns down, away from the light
+    m *= 1 - .15 * (1 - onLap) * smooth(-.25, -1, v);                // hanging part darkens downward
+    m *= 1 - .12 * smooth(-.8, -1.04, v);                             // lower edge curls under
+    m *= 1 - .1 * smooth(.82, 1.04, v);                               // back edge
+    m *= 1 - .2 * sag * (.5 + .5 * smooth(.6, -1, v));                // the sags sit in shadow
+    for (const c of creases) {
+      const d = u - (c.u + c.slant * v);
+      m *= 1 - .2 * Math.exp(-((d / 7) ** 2));
+      a += .05 * Math.exp(-(((d - 11) / 6) ** 2));
+    }
+    a += .03 * liftAt(u) * smooth(-.2, .8, v);
+    return [m, a];
+  };
+  return { rb, K, shade };
+}
+function drawScarf(g, S, W, H) {
+  const { rb, K, shade } = S;
+  const out = ribbonOutline(rb, 1.02);
+  dropShadow(g, pathOf(out), 6, 12, 10, .55);
+  dropShadow(g, pathOf(out), 2, 4, 3, .3);
+  drawKnit(g, rb, K);
+  knitFuzz(g, rb, K, 1);
+  shadeRibbon(g, rb, shade, pathOf(ribbonOutline(rb, 1.06)), W, H);
+}
+
+/* ── 14. The granddaughter's hands, the needles and the working yarn ──────── */
+function drawNeedlework(g, S) {
+  const { rb, K } = S, { N1, N2 } = GD, sk = GD.skin, red = STRIPE_RGB[ROW_CI[NROWS - 1]];
+  needle(g, N2.knob, N2.tip, 9, 'n2');
+  hand(g, { at: [1238, 598], ang: .72, L: 56, W: 40, fl: .45, skin: sk, ts: -1, ta: 1.2, tl: .5, key: 'gdFistL' });
+  needle(g, N1.knob, N1.tip, 9, 'n1');
+  liveLoops(g, rb, K);
+  const y0 = vadd(rb.at(rb.L, .8), vmul(rb.tan(rb.L), 8)), [bx, by, br] = BASKET.ball;
+  plied(g, [y0, [1300, 552], [1340, 566], [1400, 600], [1436, 660], [1462, 750], [1490, 826], [bx - 4, by - br + 4]], red, 5.5, 'workyarn');
+  hand(g, { at: [1414, 600], ang: 2.3, L: 56, W: 40, fl: .45, skin: sk, ts: 1, ta: 1.3, tl: .5, key: 'gdFistR' });
+}
+
+/* ── 15. Light, lens and grain: a diorama photographed flat ────────────────── */
+function finish(g, W, H) {
+  g.save(); g.globalCompositeOperation = 'soft-light';
+  const gr = g.createRadialGradient(250, 210, 40, 250, 210, 1800);
+  gr.addColorStop(0, 'rgba(255,214,140,.7)'); gr.addColorStop(.45, 'rgba(255,214,140,.12)'); gr.addColorStop(1, 'rgba(40,24,40,.35)');
+  g.fillStyle = gr; g.fillRect(0, 0, W, H); g.restore();
+  g.save();
+  const vg = g.createRadialGradient(W * .5, H * .52, H * .42, W * .5, H * .52, H * 1.08);
+  vg.addColorStop(0, 'rgba(20,10,5,0)'); vg.addColorStop(1, 'rgba(20,10,5,.42)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H); g.restore();
+  g.save(); g.globalCompositeOperation = 'overlay'; g.globalAlpha = .55; g.fillStyle = pats(g).grain; g.fillRect(0, 0, W, H); g.restore();
+}
+
+/* ── 16. The frame ─────────────────────────────────────────────────────────── */
+function draw(g, W, H) {
+  g0 = g;
+  buildTextures(); buildLegs();
+  drawWallAndFloor(g, W, H);
+  drawWindow(g); drawCalendar(g); drawPhoto(g); drawHoop(g); drawFanTable(g);
+  drawSofaBack(g); drawThrowCushions(g);
+  GM.back(g); MO.back(g); GD.back(g);
+  drawSofaFront(g);
+  GM.body(g); MO.body(g); GD.body(g);
+  const S = buildScarf();
+  drawScarf(g, S, W, H);
+  fringe(g, S.rb, S.K, 'blue');
+  GM.arms(g); MO.arms(g); GD.arms(g);
+  GM.over(g);
+  drawBasketBack(g); drawBasketFront(g);
+  drawNeedlework(g, S);
+  finish(g, W, H);
+}
+stillFrame(1920, 1080, draw);
+</script>
+</body></html>

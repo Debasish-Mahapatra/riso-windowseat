@@ -1,0 +1,1083 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Paint It Back · Warli wall</title>
+<style>html,body{margin:0;background:#222} canvas{display:block;width:1280px;height:720px}</style>
+</head><body>
+<canvas id="c"></canvas>
+<script src="kit.js"></script>
+<script>
+'use strict';
+/* PAINT IT BACK · style frame.
+   A Warli painting in rice paste on a red mud-and-dung wall; rain has just begun
+   to run down the right third. Pipeline: every motif is painted as white coverage
+   into a paint layer → a wet mask is built from vertical runs → the wall is made
+   per pixel → the paint is textured, dissolved, smeared and dripped where wet →
+   hairline cracks and fine rain streaks go on top. */
+
+const FW = 1920, FH = 1080;
+const PAINT = rgb('#f1eadb');
+
+/* ── helpers ─────────────────────────────────────────────────────────────── */
+const dirv = a => [Math.sin(a), Math.cos(a)];          // angle 0 points down, +π/2 points to +x
+const addv = (a, b, k = 1) => [a[0] + b[0] * k, a[1] + b[1] * k];
+const midv = (a, b, u = 0.5) => [lerp(a[0], b[0], u), lerp(a[1], b[1], u)];
+function hash2(x, y, s = 0) {
+  let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263) ^ Math.imul(s | 0, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function polyLen(p) { let L = 0; for (let i = 1; i < p.length; i++) L += Math.hypot(p[i][0] - p[i - 1][0], p[i][1] - p[i - 1][1]); return L; }
+
+/* separable box blur on a Float32Array; returns a new array */
+function blurPass(src, dst, w, h, r, horiz) {
+  const inv = 1 / (2 * r + 1);
+  if (horiz) {
+    for (let y = 0; y < h; y++) {
+      const o = y * w; let acc = 0;
+      for (let k = -r; k <= r; k++) acc += src[o + clamp(k, 0, w - 1)];
+      for (let x = 0; x < w; x++) {
+        dst[o + x] = acc * inv;
+        acc += src[o + Math.min(w - 1, x + r + 1)] - src[o + Math.max(0, x - r)];
+      }
+    }
+  } else {
+    for (let x = 0; x < w; x++) {
+      let acc = 0;
+      for (let k = -r; k <= r; k++) acc += src[clamp(k, 0, h - 1) * w + x];
+      for (let y = 0; y < h; y++) {
+        dst[y * w + x] = acc * inv;
+        acc += src[Math.min(h - 1, y + r + 1) * w + x] - src[Math.max(0, y - r) * w + x];
+      }
+    }
+  }
+}
+function blurF(src, w, h, rx, ry, passes = 1) {
+  let a = Float32Array.from(src), b = new Float32Array(src.length);
+  for (let p = 0; p < passes; p++) {
+    if (rx > 0) { blurPass(a, b, w, h, rx, true); [a, b] = [b, a]; }
+    if (ry > 0) { blurPass(a, b, w, h, ry, false); [a, b] = [b, a]; }
+  }
+  return a;
+}
+/* two-bone IK in the figure's local frame (angle 0 = down). bend ±1 picks the elbow side. */
+function ik2(s, t, a, b, bend) {
+  const dx = t[0] - s[0], dy = t[1] - s[1], d = Math.hypot(dx, dy) || 1e-6;
+  const dd = clamp(d, Math.abs(a - b) + 1e-4, a + b - 1e-4);
+  const base = Math.atan2(dx, dy);
+  const A = Math.acos(clamp((a * a + dd * dd - b * b) / (2 * a * dd), -1, 1));
+  const a1 = base + bend * A;
+  return [[s[0] + a * Math.sin(a1), s[1] + a * Math.cos(a1)], [s[0] + dx / d * dd, s[1] + dy / d * dd]];
+}
+
+/* ── the painter: a chewed bamboo stick loaded with rice paste ─────────────────
+   Everything is painted as white coverage into PG (alpha = paste). Colour, grain,
+   translucency and the rain are applied later, per pixel. */
+let PG = null;
+const PR = rngFor('paint:hand');
+const PN = makeNoise('paint:hand');
+/* paste load: the stick is dipped, runs thinner stroke by stroke, and is dipped again */
+let STROKE = 0;
+const load = () => { STROKE++; return 0.84 + 0.16 * clamp(PN(STROKE * 0.035, 77.7) * 1.4 + 0.55); };
+function handPath(pts, step, amp, seed) {
+  const p = resample(pts, step);
+  return p.map(([x, y], i) => [x + amp * PN(seed + i * step * 0.05, 1.7), y + amp * PN(seed + i * step * 0.05, 8.3)]);
+}
+/** A painted line. w = full width in px. o: alpha, dry (drag at the end), start (loaded
+ *  blob), end (end width factor), vary (width wobble), trem (hand tremor px), g. */
+function pLine(pts, w, o = {}) {
+  const g = o.g || PG;
+  if (!pts || pts.length < 2) return;
+  const seed = PR() * 900;
+  const p = handPath(pts, o.step || 1.1, o.trem ?? 0.32, seed);
+  if (p.length < 2) return;
+  const L = polyLen(p), hw = w / 2, a = (o.alpha ?? 0.95) * load(), vary = o.vary ?? 0.2;
+  const dry = o.dry ?? (L > 34 && w > 1.6), stB = o.start ?? 1.12, enT = dry ? 0.5 : (o.end ?? 0.72);
+  const wf = s => {
+    const v = 1 + vary * 1.8 * PN(seed + s * L * 0.045, 5.5);
+    const st = lerp(stB, 1, smooth(0, Math.min(0.3, 5 / L), s));
+    const en = lerp(1, enT, smooth(dry ? 0.58 : 0.7, 1, s));
+    return Math.max(0.32, hw * v * st * en);
+  };
+  g.fillStyle = `rgba(255,255,255,${a})`;
+  g.beginPath(); trace(g, taper(p, wf), true); g.fill();
+  g.beginPath(); g.arc(p[0][0], p[0][1], wf(0) * 0.97, 0, TAU); g.fill();
+  if (!dry) { const e = p[p.length - 1]; g.beginPath(); g.arc(e[0], e[1], wf(1) * 0.94, 0, TAU); g.fill(); }
+  else dryEnd(g, p, L, hw, a);
+}
+/* the stick running out of paste: bristle tails and thin gaps at the end of a stroke */
+function dryEnd(g, p, L, hw, a) {
+  const n = p.length, seg = p.slice(Math.floor(n * 0.6));
+  if (seg.length < 3) return;
+  const e = p[n - 1], e2 = p[Math.max(0, n - 5)];
+  let dx = e[0] - e2[0], dy = e[1] - e2[1]; const d = Math.hypot(dx, dy) || 1; dx /= d; dy /= d;
+  const nx = -dy, ny = dx, k = 3 + (PR() * 2 | 0);
+  for (let j = 0; j < k; j++) {
+    const off = ((j + 0.5) / k - 0.5) * hw * 1.5 + (PR() - 0.5) * hw * 0.3;
+    const ext = PR() * Math.min(8, L * 0.1);
+    const pts = seg.map(([x, y], i) => { const u = i / (seg.length - 1); return [x + nx * off * u, y + ny * off * u]; });
+    pts.push([e[0] + dx * ext + nx * off, e[1] + dy * ext + ny * off]);
+    const bw = Math.max(0.3, hw * range(PR, 0.2, 0.34));
+    g.fillStyle = `rgba(255,255,255,${a * range(PR, 0.4, 0.75)})`;
+    g.beginPath(); trace(g, taper(pts, s => bw * (1 - 0.65 * smooth(0.55, 1, s))), true); g.fill();
+  }
+  g.save(); g.globalCompositeOperation = 'destination-out';
+  for (let j = 0; j < 2; j++) {
+    const off = (PR() - 0.5) * hw * 0.9, from = Math.floor(seg.length * range(PR, 0.25, 0.65));
+    const pts = seg.slice(from).map(([x, y]) => [x + nx * off, y + ny * off]);
+    if (pts.length < 2) continue;
+    g.fillStyle = `rgba(0,0,0,${range(PR, 0.3, 0.65)})`;
+    g.beginPath(); trace(g, taper(pts, s => 0.3 + 0.3 * s), true); g.fill();
+  }
+  g.restore();
+}
+/** A painted fill: slightly irregular edge, a denser rim where the outline went first. */
+function pFill(poly, o = {}) {
+  const g = o.g || PG, seed = PR() * 900, step = o.step ?? 1.4, amp = o.wob ?? 0.55;
+  let p = resample(poly, step, true);
+  p = p.map(([x, y], i) => [x + amp * PN(seed + i * step * 0.09, 3.3), y + amp * PN(seed + i * step * 0.09, 9.9)]);
+  g.fillStyle = `rgba(255,255,255,${(o.alpha ?? 0.93) * load()})`;
+  g.beginPath(); trace(g, p, true); g.fill();
+  if (o.edge !== 0) {
+    g.strokeStyle = `rgba(255,255,255,${o.edge ?? 0.45})`; g.lineWidth = o.edgeW ?? 1.1; g.lineJoin = 'round';
+    g.beginPath(); trace(g, p, true); g.stroke();
+  }
+}
+function pDot(x, y, r, o = {}) {
+  const e = 1 + (PR() - 0.5) * 0.16, rot = PR() * TAU;
+  pFill(ellipsePts(x, y, r * e, r / e, Math.max(10, Math.round(r * 5)), rot), { step: Math.max(0.6, r * 0.4), wob: o.wob ?? Math.min(0.5, r * 0.12), edge: 0, alpha: o.alpha, g: o.g });
+}
+function pRing(x, y, rx, ry, w, o = {}) {
+  const pts = ellipsePts(x, y, rx, ry, 64, o.rot || 0); pts.push(pts[0], pts[1]);
+  pLine(pts, w, Object.assign({ dry: false }, o));
+}
+/** Scratch paint away (eyes, bands on pots, scales). */
+function pCut(pts, w, a = 0.9) {
+  PG.save(); PG.globalCompositeOperation = 'destination-out';
+  PG.strokeStyle = `rgba(0,0,0,${a})`; PG.lineWidth = w; PG.lineCap = 'round'; PG.lineJoin = 'round';
+  PG.beginPath(); trace(PG, pts, false); PG.stroke(); PG.restore();
+}
+function pHole(x, y, r, a = 0.95) {
+  PG.save(); PG.globalCompositeOperation = 'destination-out'; PG.fillStyle = `rgba(0,0,0,${a})`;
+  PG.beginPath(); PG.arc(x, y, r, 0, TAU); PG.fill(); PG.restore();
+}
+</script>
+<script>
+/* ── the Warli figure ─────────────────────────────────────────────────────────
+   Two triangles tip to tip (an inverted torso over upright hips), a round head on
+   a short neck, stick limbs bent at elbows and knees. Units are fractions of the
+   figure's height; the pose is joint angles, so the film can animate it.
+   Angles: 0 = hanging straight down, positive swings OUTWARD from that side.
+   pose = { face: ±1, woman, bun, lean, seat, headX, thick,
+            la/ra: [shoulder, elbow], ll/rl: [hip, knee],
+            lhT/rhT/lfT/rfT: world targets for hands/feet (two-bone IK),
+            elbL/elbR: ±1 which way an IK elbow folds } */
+const RIG = {
+  headR: 0.08, headY: 0.915, shY: 0.79, waistY: 0.565, hipY: 0.385,
+  shW: 0.165, hipW: 0.138, uArm: 0.19, fArm: 0.18, thigh: 0.205, shin: 0.2,
+  limb: 0.041, foot: 0.06,
+};
+function warliPerson(g, x, y, size, angle, pose = {}) {
+  const S = size, f = pose.face ?? 1, woman = !!pose.woman, bun = pose.bun ?? woman;
+  const r = rngFor('fig:' + (pose.key ?? `${x.toFixed(1)},${y.toFixed(1)}`));
+  const J = (k = 1) => (r() - 0.5) * 0.02 * k;
+  const seat = pose.seat || 0, lean = pose.lean || 0;
+  const ca = Math.cos(angle), sa = Math.sin(angle);
+  const toW = ([lx, ly]) => { const X = lx * f * S, Y = ly * S; return [x + X * ca - Y * sa, y + X * sa + Y * ca]; };
+  const toL = ([wx, wy]) => { const dx = wx - x, dy = wy - y; return [(dx * ca + dy * sa) / S * f, (-dx * sa + dy * ca) / S]; };
+  const waistY = RIG.waistY - seat, shY = RIG.shY - seat, hipY = RIG.hipY - seat - (woman ? 0.022 : 0);
+  const hipW = RIG.hipW * (woman ? 1.12 : 1) * (1 + J(4)), shW = RIG.shW * (1 + J(4));
+  const waist = [J(0.6), -waistY];
+  const cl = Math.cos(lean), sl = Math.sin(lean);
+  const up = ([lx, ly]) => { const dx = lx - waist[0], dy = ly - waist[1]; return [waist[0] + dx * cl - dy * sl, waist[1] + dx * sl + dy * cl]; };
+  const shL = up([-shW, -shY + J()]), shR = up([shW, -shY + J()]);
+  const tipU = up([waist[0], waist[1] + 0.013]);         // the torso's apex dips just past the waist
+  const tipD = [waist[0], waist[1] - 0.013];             // the hips' apex rises just past it
+  const hipL = [-hipW, -hipY + J(0.5)], hipR = [hipW, -hipY + J(0.5)];
+  const hx = (pose.headX ?? 0) + J(0.5), head0 = [hx, -(RIG.headY - seat)], headC = up(head0);
+  const neckA = up([0, -shY - 0.004]), neckB = up([hx * 0.7, head0[1] + RIG.headR * 0.8]);
+  const limb = (root, spec, side, A, B, tgt, bend) => {
+    if (tgt) { const [e, h] = ik2(root, toL(tgt), A, B, bend); return [root, e, h]; }
+    const a1 = side * spec[0], a2 = a1 + side * spec[1];
+    const e = addv(root, dirv(a1), A);
+    return [root, e, addv(e, dirv(a2), B)];
+  };
+  const lw = RIG.limb * S * (pose.thick ?? 1), P = pts => pts.map(toW);
+  const legs = [limb([-hipW * 0.8, -hipY], pose.ll || [0.2, -0.22], -1, RIG.thigh, RIG.shin, pose.lfT, 1),
+                limb([hipW * 0.8, -hipY], pose.rl || [0.2, -0.22], 1, RIG.thigh, RIG.shin, pose.rfT, -1)];
+  const arms = [limb(shL, pose.la || [0.35, -0.25], -1, RIG.uArm, RIG.fArm, pose.lhT, pose.elbL ?? 1),
+                limb(shR, pose.ra || [0.35, -0.25], 1, RIG.uArm, RIG.fArm, pose.rhT, -(pose.elbR ?? 1))];
+  if (!pose.noDraw) {
+    for (const L of legs) {
+      pLine(P(L), lw * 1.05, { dry: false, end: 0.85, g });
+      const ft = L[2], fd = pose.footDir ?? 0;
+      pLine(P([ft, [ft[0] + RIG.foot * Math.cos(fd), ft[1] + 0.006 + RIG.foot * Math.sin(fd)]]), lw * 0.95, { dry: false, end: 0.7, g, trem: 0.1 });
+    }
+    pFill(P([tipD, hipL, hipR]), { g });
+    pFill(P([shL, shR, tipU]), { g });
+    for (const A of arms) pLine(P(A), lw, { dry: false, end: 0.82, g });
+    pLine(P([neckA, neckB]), lw * 0.9, { dry: false, g, trem: 0.1 });
+    const hc = toW(headC); pDot(hc[0], hc[1], RIG.headR * S, { g });
+    if (bun) { const b = toW(up([hx - 0.074, head0[1] - 0.03])); pDot(b[0], b[1], 0.034 * S, { g }); }
+    for (const A of arms) { const h = toW(A[2]); pDot(h[0], h[1], lw * 0.66, { g }); }
+  }
+  return { S, toW, toL, head: toW(headC), headR: RIG.headR * S, top: toW(up([hx, head0[1] - RIG.headR])),
+           hands: arms.map(A => toW(A[2])), elbows: arms.map(A => toW(A[1])), shoulders: [toW(shL), toW(shR)],
+           feet: legs.map(L => toW(L[2])), waist: toW(waist) };
+}
+/* a stride, phase in [0,1): the walk cycle the film would loop */
+function stride(ph, k = 1) {
+  const s = Math.sin(ph * TAU);
+  return { ll: [0.06 + 0.3 * k * s, 0.12 + 0.22 * k * Math.max(0, s)], rl: [0.06 - 0.3 * k * s, 0.12 + 0.22 * k * Math.max(0, -s)],
+           la: [0.28 - 0.3 * k * s, 0.2], ra: [0.28 + 0.3 * k * s, -0.2] };
+}
+/** matka on the head: returns the geometry first so the raised arm can reach it */
+function potGeom(x, y, S, k = 1) {
+  const top = y - (RIG.headY + RIG.headR) * S;
+  const rx = 0.12 * S * k, ry = 0.098 * S * k, cy = top - ry * 0.9 - 0.006 * S;
+  return { x, cy, rx, ry, top };
+}
+function drawPot(pg, stack) {
+  const { x, cy, rx, ry } = pg;
+  pFill(ellipsePts(x, cy, rx, ry, 30), { edge: 0.3 });
+  const nw = rx * 0.42, t = cy - ry * 0.92, rim = t - ry * 0.42;
+  pFill([[x - nw, t + 1], [x + nw, t + 1], [x + nw * 1.3, rim], [x - nw * 1.3, rim]], { edge: 0.3 });
+  pCut([[x - rx * 0.78, cy + ry * 0.12], [x + rx * 0.78, cy + ry * 0.12]], 0.9, 0.75);
+  if (stack) {
+    const r2 = rx * 0.68, q2 = ry * 0.66, c2 = rim - q2 * 0.85;
+    pFill(ellipsePts(x, c2, r2, q2, 24), { edge: 0.3 });
+    const n2 = r2 * 0.45, t2 = c2 - q2 * 0.9, rim2 = t2 - q2 * 0.45;
+    pFill([[x - n2, t2 + 1], [x + n2, t2 + 1], [x + n2 * 1.3, rim2], [x - n2 * 1.3, rim2]], { edge: 0.3 });
+  }
+}
+function womanWithPot(x, y, S, face, ph, key, stack = true) {
+  const pg = potGeom(x, y, S), st = stride(ph, 0.85);
+  const pose = Object.assign({ face, woman: true, key }, st);
+  // the arm on the far side steadies the pot; the near arm swings
+  pose.lhT = [x - face * pg.rx * 0.95, pg.cy + pg.ry * 0.15]; pose.elbL = -1;
+  warliPerson(PG, x, y, S, 0, pose);
+  drawPot(pg, stack);
+}
+</script>
+<script>
+/* ── motifs: sky, homes, trees, birds ─────────────────────────────────────── */
+function sun(cx, cy, R) {
+  pDot(cx, cy, R, { wob: 0.9 });
+  pCut(ellipsePts(cx, cy, R * 0.62, R * 0.62, 40).concat([[cx + R * 0.62, cy]]), 1.6, 0.8);
+  pRing(cx, cy, R * 1.3, R * 1.3, 2.8);
+  const n = 18, r = rngFor('sun:rays');
+  for (let i = 0; i < n; i++) {
+    const a = i / n * TAU + 0.12, half = TAU / n * 0.27, r0 = R * 1.52, r1 = R * (2.08 + (r() - 0.5) * 0.12);
+    pFill([[cx + Math.cos(a - half) * r0, cy + Math.sin(a - half) * r0], [cx + Math.cos(a + half) * r0, cy + Math.sin(a + half) * r0],
+           [cx + Math.cos(a) * r1, cy + Math.sin(a) * r1]], { wob: 0.45 });
+    const b = a + TAU / n / 2; pDot(cx + Math.cos(b) * R * 1.68, cy + Math.sin(b) * R * 1.68, 1.7);
+  }
+}
+/* square-walled hut: thatch lines fanning from the ridge, a doorway, a row of dots */
+function hutSquare(x, y, w, hw, hr, key) {
+  const r = rngFor('hut:' + key), L = x - w / 2, R = x + w / 2, T = y - hw, ov = w * 0.13;
+  pLine([[L - 5, y], [R + 5, y + 1]], 3.4, {});
+  pLine([[L, y], [L + 0.6, T + 1]], 3.1, { dry: false });
+  pLine([[R, y], [R - 0.6, T + 1]], 3.1, { dry: false });
+  const A = [x + (r() - 0.5) * 3, T - hr], E1 = [L - ov, T + 3], E2 = [R + ov, T + 2];
+  pLine([E1, A], 3.4, { dry: false }); pLine([A, E2], 3.4, { dry: false }); pLine([E1, E2], 3.2, { dry: false });
+  const n = 10;
+  for (let i = 1; i < n; i++) { const p = midv(E1, E2, i / n + (r() - 0.5) * 0.02); pLine([midv(A, p, 0.14), midv(A, p, 0.95)], 1.7, { dry: false, end: 0.5 }); }
+  pLine([A, [A[0] + 1, A[1] - 13]], 2.4, { dry: false }); pDot(A[0] + 1, A[1] - 15, 2.6);
+  const dw = w * 0.27, dh = hw * 0.74, dx = x + w * 0.14;
+  pLine([[dx - dw / 2, y], [dx - dw / 2, y - dh], [dx + dw / 2, y - dh], [dx + dw / 2, y]], 2.5, { dry: false });
+  for (let i = 0; i < 7; i++) pDot(lerp(L + 8, R - 8, i / 6), T + 9, 1.8);
+  const wx = x - w * 0.24;   // a small window of crossed sticks
+  pLine([[wx - 8, y - hw * 0.55], [wx + 8, y - hw * 0.55]], 1.8, { dry: false });
+  pLine([[wx, y - hw * 0.55 - 8], [wx, y - hw * 0.55 + 8]], 1.8, { dry: false });
+  return { door: [dx, y], A };
+}
+/* round-walled hut: a circle of wall under a cone of thatch */
+function hutRound(x, y, R, hr, key) {
+  const r = rngFor('hutr:' + key), cy = y - R;
+  const wall = []; for (let i = 0; i <= 40; i++) { const a = lerp(-0.25, Math.PI + 0.25, i / 40); wall.push([x + Math.cos(a) * R, cy + Math.sin(a) * R * 1.02]); }
+  pLine(wall, 3.1, { dry: false });
+  const eL = [x - R * 1.28, cy - R * 0.2], eR = [x + R * 1.28, cy - R * 0.18], A = [x + (r() - 0.5) * 3, cy - R * 0.2 - hr];
+  pLine([eL, A], 3.4, { dry: false }); pLine([A, eR], 3.4, { dry: false });
+  pLine(curve([eL, [x, cy - R * 0.02], eR], false, 10), 3.1, { dry: false });
+  for (let i = 1; i < 9; i++) { const u = i / 9, p = [lerp(eL[0], eR[0], u), cy - R * 0.2 + Math.sin(u * Math.PI) * R * 0.17]; pLine([midv(A, p, 0.16), midv(A, p, 0.94)], 1.6, { dry: false, end: 0.5 }); }
+  pLine([A, [A[0], A[1] - 12]], 2.3, { dry: false }); pDot(A[0], A[1] - 14, 2.4);
+  const dw = R * 0.52, dt = cy + R * 0.12;
+  pLine([[x - dw / 2, y], [x - dw / 2, dt + dw / 2]].concat(curve([[x - dw / 2, dt + dw / 2], [x, dt], [x + dw / 2, dt + dw / 2]], false, 8)).concat([[x + dw / 2, y]]), 2.4, { dry: false });
+  for (let i = 0; i < 5; i++) { const a = lerp(0.35, Math.PI - 0.35, i / 4); pDot(x - Math.cos(a) * R * 0.72, cy + Math.sin(a) * R * 0.1 - R * 0.02, 1.7); }
+  return { A };
+}
+function leaf(p, ang, L, W) {
+  const d = [Math.sin(ang), -Math.cos(ang)], n = [-d[1], d[0]];
+  const m = addv(p, d, L * 0.42);
+  pFill([p, addv(m, n, W / 2), addv(p, d, L), addv(m, n, -W / 2)], { step: 0.7, wob: 0.22, edge: 0, alpha: 0.95 });
+}
+/* a tree: fractal branching inside an egg-shaped crown, small paired leaves (or
+   herringbone strokes), a few roots. Returns perches for birds. */
+function bigTree(x, y, H, key, o = {}) {
+  const r = rngFor('tree:' + key), perches = [], leaves = [], depth0 = o.depth ?? 6, ls = o.leaf ?? 1;
+  const ecx = x + (o.dx ?? 0) * H, ecy = y - H * (o.cy ?? 0.64), erx = H * (o.rx ?? 0.36), ery = H * (o.ry ?? 0.37);
+  const inside = (px, py) => ((px - ecx) / erx) ** 2 + ((py - ecy) / ery) ** 2;
+  for (let i = 0; i < 5; i++) {
+    const sd = (i / 4 - 0.5) * 2, len = range(r, 0.06, 0.1) * H;
+    pLine(curve([[x + sd * 3, y - 5], [x + sd * len * 0.5, y + 3 + Math.abs(sd) * 2], [x + sd * len, y + 7 + r() * 5]], false, 6), Math.max(1.6, (o.w ?? 15) * 0.25 - Math.abs(sd)), { dry: false, end: 0.3 });
+  }
+  const leafAt = (q, ang, off = 1.2) => {
+    const b = [q[0] + Math.sin(ang) * off, q[1] - Math.cos(ang) * off];
+    leaves.push([b[0] + Math.sin(ang) * 11, b[1] - Math.cos(ang) * 11]);
+    if (o.style === 'strokes') { const l = range(r, 8, 11) * ls; pLine([b, [b[0] + Math.sin(ang) * l, b[1] - Math.cos(ang) * l]], 1.7, { dry: false, end: 0.35, trem: 0.1 }); }
+    else leaf(b, ang, range(r, 10.5, 13) * ls, range(r, 4.2, 5) * ls);
+  };
+  const rec = (p, ang, len, w, depth) => {
+    let e = [p[0] + Math.sin(ang) * len, p[1] - Math.cos(ang) * len];
+    if (depth < depth0 && inside(e[0], e[1]) > 1) {
+      let lo = 0.25, hi = 1;
+      for (let k = 0; k < 8; k++) { const m = (lo + hi) / 2, q = [p[0] + Math.sin(ang) * len * m, p[1] - Math.cos(ang) * len * m]; if (inside(q[0], q[1]) > 1) hi = m; else lo = m; }
+      len *= lo; e = [p[0] + Math.sin(ang) * len, p[1] - Math.cos(ang) * len];
+    }
+    const bend = (r() - 0.5) * 0.28, m = [p[0] + Math.sin(ang + bend) * len * 0.5, p[1] - Math.cos(ang + bend) * len * 0.5];
+    pLine(curve([p, m, e], false, 5), w, { dry: false, end: 0.8, vary: 0.1, start: 1.02 });
+    if (depth <= (o.leafDepth ?? 3)) {
+      const gap = 7.6 * ls, n = Math.floor(len / gap);
+      for (let i = 1; i <= n; i++) {
+        const u = (i - 0.35) / n, q = [lerp(p[0], e[0], u), lerp(p[1], e[1], u)], sd = (i + depth) % 2 ? 1 : -1;
+        leafAt(q, ang + sd * (0.95 + (r() - 0.5) * 0.25), w * 0.5 + 0.6);
+      }
+    }
+    if (depth === 0) { if (len > 9) leafAt(e, ang + (r() - 0.5) * 0.2, 0.5); return; }
+    if (depth >= depth0 - 2 && depth < depth0 && Math.abs(ang) > 0.25) perches.push({ p: midv(p, e, range(r, 0.45, 0.72)), ang, depth, len });
+    const n = depth === depth0 ? 3 : (r() < 0.32 ? 3 : 2), spread = (o.spread ?? 0.36) + r() * 0.12;
+    for (let k = 0; k < n; k++) {
+      const u = k / (n - 1) - 0.5;
+      rec(e, ang * 0.9 + u * spread * 2 + (r() - 0.5) * 0.2, len * range(r, 0.74, 0.84), Math.max(1.3, w * 0.66), depth - 1);
+    }
+  };
+  rec([x, y], (r() - 0.5) * 0.05, H * (o.trunk ?? 0.3), o.w ?? 15, depth0);
+  return { perches, leaves };
+}
+/* a perched bird, y = where its feet grip */
+function bird(x, y, s, face, flying) {
+  const P = (lx, ly) => [x + face * lx * s, y + ly * s];
+  if (flying) {
+    pFill(curve([P(-0.5, 0), P(-0.1, -0.1), P(0.35, -0.08), P(0.5, 0.02), P(0.1, 0.1), P(-0.3, 0.06)], true, 4), { edge: 0 });
+    pFill([P(-0.05, -0.05), P(-0.45, -0.62), P(0.2, -0.06)], { wob: 0.3 });
+    pFill([P(0.05, -0.02), P(0.25, -0.55), P(0.3, -0.04)], { wob: 0.3, alpha: 0.85 });
+    pFill([P(-0.45, 0), P(-0.8, -0.14), P(-0.78, 0.12)], { wob: 0.3 });
+    pDot(...P(0.52, -0.08), 0.09 * s); pLine([P(0.6, -0.08), P(0.72, -0.05)], 1.1, { dry: false });
+    return;
+  }
+  pFill(curve([P(-0.45, -0.42), P(-0.05, -0.6), P(0.3, -0.58), P(0.44, -0.46), P(0.28, -0.3), P(-0.12, -0.27)], true, 4), { edge: 0 });
+  pDot(...P(0.4, -0.7), 0.12 * s);
+  pLine([P(0.5, -0.72), P(0.64, -0.68)], 1.2, { dry: false, end: 0.4 });
+  pFill([P(-0.35, -0.42), P(-0.9, -0.62), P(-0.84, -0.36)], { wob: 0.3 });
+  pLine([P(-0.02, -0.3), P(-0.04, 0)], 1.05, { dry: false }); pLine([P(0.1, -0.3), P(0.1, 0)], 1.05, { dry: false });
+  pHole(...P(0.43, -0.72), 0.7, 0.8);
+}
+/* rooster, y = feet, s = height */
+function rooster(x, y, s, face) {
+  const P = (lx, ly) => [x + face * lx * s, y + ly * s];
+  pFill(curve([P(-0.36, -0.52), P(-0.08, -0.62), P(0.16, -0.64), P(0.3, -0.56), P(0.3, -0.38), P(0.1, -0.27), P(-0.2, -0.3)], true, 5), { edge: 0.3 });
+  pFill([P(0.12, -0.6), P(0.24, -0.84), P(0.33, -0.83), P(0.3, -0.55)], { wob: 0.3 });
+  pDot(...P(0.29, -0.86), 0.075 * s);
+  for (let i = 0; i < 3; i++) pDot(...P(0.23 + i * 0.055, -0.95 + Math.abs(i - 1) * 0.02), 0.036 * s);
+  pFill([P(0.35, -0.88), P(0.45, -0.85), P(0.35, -0.83)], { wob: 0.15 });
+  pDot(...P(0.34, -0.77), 0.03 * s);
+  for (let i = 0; i < 5; i++) {
+    const k = i / 4;
+    pLine(bezier(P(-0.3, -0.52), P(-0.38 - 0.1 * k, -0.95 + 0.12 * k), P(-0.62 - 0.08 * k, -0.9 + 0.2 * k), P(-0.66 - 0.06 * k, -0.45 + 0.08 * k), 12), 1.9 - k * 0.3, { dry: false, end: 0.4 });
+  }
+  pCut(curve([P(-0.14, -0.52), P(0.02, -0.46), P(0.16, -0.48)], false, 5), 0.9, 0.6);
+  for (const lx of [0.0, 0.1]) { pLine([P(lx, -0.3), P(lx + 0.02, -0.02)], 1.3, { dry: false }); pLine([P(lx + 0.02, -0.02), P(lx + 0.12, 0)], 1.1, { dry: false }); }
+  pHole(...P(0.3, -0.87), 0.6, 0.8);
+}
+/* two women seated at the jaata (hand quern), facing each other, both on the peg */
+function grinder(x, y, S, key) {
+  const qr = 0.2 * S;
+  pFill(ellipsePts(x, y - 0.035 * S, qr * 1.05, 0.042 * S, 30), { edge: 0.4 });
+  pFill(ellipsePts(x, y - 0.1 * S, qr * 0.9, 0.036 * S, 30), { edge: 0.4 });
+  pCut([[x - qr * 0.95, y - 0.068 * S], [x + qr * 0.95, y - 0.068 * S]], 1.3, 0.8);
+  const ht = [x + 0.05 * S, y - 0.24 * S];
+  pLine([[x + 0.05 * S, y - 0.12 * S], ht], 2.4, { dry: false });
+  pDot(x, y - 0.1 * S, 1.6);
+  for (let i = 0; i < 12; i++) { const u = i / 11, sd = i % 2 ? 1 : -1; pDot(x + sd * lerp(qr * 1.15, qr * 1.5, u), y - 1 - Math.sin(u * Math.PI) * 2, 1.05); }
+  for (const f of [1, -1]) {
+    const wx = x - f * 0.5 * S;
+    warliPerson(PG, wx, y, S, 0, { face: f, woman: true, key: key + f, seat: 0.305, lean: 0.1,
+      rl: [2.1, -1.85], ll: [-1.4, 2.9], rhT: [ht[0] - f * 0.012 * S, ht[1] + (f > 0 ? 0.0 : 0.04) * S], lhT: [ht[0] - f * 0.03 * S, ht[1] + (f > 0 ? 0.05 : 0.09) * S], elbL: -1, elbR: 1 });
+  }
+}
+</script>
+<script>
+/* ── motifs: animals, fields, water, borders ─────────────────────────────── */
+/* bullock: body of two triangles tip to tip, hump, wedge head, crescent horns.
+   L = body length, y = hooves. */
+function bullock(x, y, L, face, key, o = {}) {
+  const r = rngFor('ox:' + key), P = (lx, ly) => [x + face * lx * L, y + ly * L];
+  const top = 0.8, belly = 0.42, j = () => (r() - 0.5) * 0.02;
+  const step = o.step ?? 0.5;
+  // legs first so the body sits over their roots
+  const lw = 0.034 * L;
+  const fr = (hx, a, k) => { const hip = P(hx, -belly - 0.02), knee = addv(hip, [face * Math.sin(a) * 0.2 * L, Math.cos(a) * 0.2 * L]);
+    const hoof = addv(knee, [face * Math.sin(a + k) * 0.22 * L, Math.cos(a + k) * 0.22 * L]); pLine([hip, knee, hoof], lw, { dry: false, end: 0.9 }); pDot(hoof[0] + face * 1, hoof[1], lw * 0.8); };
+  fr(0.44, 0.22 * step, -0.12); fr(0.4, -0.2 * step, 0.08);
+  fr(-0.44, -0.24 * step, 0.3); fr(-0.4, 0.18 * step, 0.22);
+  pFill([P(0.5, -top - 0.02 + j()), P(0.5, -belly + j()), P(-0.035, -0.605)], {});
+  pFill([P(-0.5, -top + 0.015 + j()), P(-0.5, -belly - 0.02 + j()), P(0.035, -0.625)], {});
+  pFill(curve([P(0.27, -top + 0.01), P(0.33, -top - 0.075), P(0.44, -top - 0.085), P(0.5, -top - 0.02)], false, 5).concat([P(0.45, -top + 0.03)]), { edge: 0 });
+  const hd = [P(0.47, -top + 0.03), P(0.6, -top - 0.03), P(0.66, -top - 0.02), P(0.8, -0.6), P(0.71, -0.56), P(0.5, -0.62)];
+  pFill(hd, {});
+  pLine(curve([P(0.6, -top - 0.02), P(0.55, -top - 0.12), P(0.6, -top - 0.2)], false, 6), 0.03 * L, { dry: false, end: 0.35 });
+  pLine(curve([P(0.65, -top - 0.02), P(0.72, -top - 0.12), P(0.8, -top - 0.15)], false, 6), 0.03 * L, { dry: false, end: 0.35 });
+  pLine([P(0.6, -top + 0.04), P(0.5, -top + 0.09)], 0.026 * L, { dry: false, end: 0.4 });
+  pHole(...P(0.67, -0.72), 0.022 * L, 0.85);
+  const tail = curve([P(-0.5, -top + 0.03), P(-0.58, -0.66), P(-0.58, -0.46)], false, 8);
+  pLine(tail, 0.022 * L, { dry: false });
+  pFill(ellipsePts(tail[tail.length - 1][0], tail[tail.length - 1][1] + 0.04 * L, 0.02 * L, 0.05 * L, 12), { edge: 0 });
+  return { neck: P(0.5, -top + 0.02), yoke: P(0.47, -top - 0.03) };
+}
+function ploughTeam(x, y, S) {
+  const L = 1.1 * S;
+  const far = bullock(x + 2.12 * S, y - 0.5 * S, L, 1, 'far', { step: -0.6 });
+  const near = bullock(x + 1.84 * S, y, L, 1, 'near', { step: 0.7 });
+  pLine([addv(near.yoke, [0, 4]), addv(far.yoke, [0, -8])], 2.8, { dry: false });
+  const share = [x + 0.62 * S, y - 0.03 * S], hitch = midv(near.yoke, far.yoke, 0.35);
+  pLine([hitch, [x + 0.95 * S, y - 0.24 * S], share], 2.5, { dry: false });
+  pFill([addv(share, [-3, -2]), [share[0] + 0.16 * S, y + 0.03 * S], [share[0] - 0.01 * S, y + 0.045 * S]], { wob: 0.3 });
+  const handle = [x + 0.3 * S, y - 0.6 * S];
+  pLine([share, handle, [handle[0] - 0.05 * S, handle[1] - 0.04 * S]], 2.3, { dry: false });
+  const st = stride(0.18, 0.9);
+  const man = warliPerson(PG, x, y, S, 0, Object.assign({ face: 1, key: 'ploughman' }, st, { rhT: handle, elbR: -1, la: [2.3, 0.5] }));
+  const h = man.hands[0];
+  pLine([addv(h, [4, 4]), addv(h, [-0.1 * S, -0.3 * S])], 1.8, { dry: false, end: 0.5 });
+  for (let i = 0; i < 7; i++) pLine([[x + 0.45 * S - i * 0.16 * S, y + 0.07 * S], [x + 0.55 * S - i * 0.16 * S, y + 0.07 * S]], 1.5, { dry: false, end: 0.5 });
+}
+/* spotted deer: slender two-triangle body, long neck, branched antlers */
+function deer(x, y, s, face, o = {}) {
+  const P = (lx, ly) => [x + face * lx * s, y + ly * s], lw = 0.035 * s;
+  const leg = (hx, hy, a, k) => { const hip = P(hx, hy), kn = addv(hip, [face * Math.sin(a) * 0.3 * s, Math.cos(a) * 0.3 * s]);
+    pLine([hip, kn, addv(kn, [face * Math.sin(a + k) * 0.3 * s, Math.cos(a + k) * 0.3 * s])], lw, { dry: false, end: 0.7 }); };
+  leg(0.4, -0.6, 0.12, -0.05); leg(0.34, -0.6, -0.12, 0.05); leg(-0.4, -0.62, -0.16, 0.34); leg(-0.34, -0.62, 0.1, 0.2);
+  pFill([P(0.44, -1.0), P(0.44, -0.58), P(-0.03, -0.77)], {});
+  pFill([P(-0.44, -0.98), P(-0.44, -0.6), P(0.03, -0.79)], {});
+  const graze = !!o.graze;
+  const hb = graze ? [P(0.62, -0.42), P(0.76, -0.2), P(0.66, -0.2)] : [P(0.56, -1.44), P(0.78, -1.3), P(0.6, -1.3)];
+  const nk = graze ? [P(0.36, -1.0), P(0.46, -0.98), P(0.68, -0.4), P(0.62, -0.38)] : [P(0.34, -0.99), P(0.44, -1.0), P(0.64, -1.36), P(0.56, -1.4)];
+  pFill(nk, { edge: 0 }); pFill(hb, {});
+  const ear = graze ? [P(0.6, -0.44), P(0.52, -0.5)] : [P(0.58, -1.4), P(0.48, -1.44)];
+  pLine(ear, lw * 1.1, { dry: false, end: 0.4 });
+  if (o.antlers) {
+    const b = graze ? P(0.62, -0.46) : P(0.6, -1.44), sgn = graze ? 1 : -1;
+    const tip = addv(b, [-face * 0.22 * s, sgn * 0.42 * s]);
+    const beam = curve([b, addv(b, [-face * 0.02 * s, sgn * 0.2 * s]), tip], false, 8);
+    pLine(beam, lw * 1.05, { dry: false, end: 0.4 });
+    for (const [u, dx, dy] of [[0.35, 0.14, 0.08], [0.62, 0.16, 0.06], [0.82, -0.04, 0.12]]) {
+      const q = beam[Math.floor(u * (beam.length - 1))];
+      pLine([q, addv(q, [face * dx * s, sgn * dy * s])], lw * 0.9, { dry: false, end: 0.35 });
+    }
+  }
+  pLine([P(-0.44, -0.98), P(-0.52, -1.08)], lw * 1.2, { dry: false, end: 0.4 });
+  const spots = [[0.3, -0.84], [0.22, -0.7], [0.32, -0.66], [-0.3, -0.86], [-0.2, -0.72], [-0.33, -0.7], [0.12, -0.78]];
+  for (const [sx, sy] of spots) pHole(...P(sx, sy), 0.024 * s, 0.7);
+  pHole(...(graze ? P(0.67, -0.3) : P(0.64, -1.36)), 0.02 * s, 0.85);
+}
+/* fish, s = length */
+function fish(x, y, s, face, ang = 0) {
+  const c = Math.cos(ang), sn = Math.sin(ang), P = (lx, ly) => { const X = lx * s * face, Y = ly * s; return [x + X * c - Y * sn, y + X * sn + Y * c]; };
+  pFill(curve([P(-0.44, 0), P(-0.16, -0.19), P(0.2, -0.2), P(0.48, -0.02), P(0.2, 0.18), P(-0.16, 0.17)], true, 5), { edge: 0.3 });
+  pFill([P(-0.38, 0), P(-0.72, -0.24), P(-0.62, 0), P(-0.72, 0.23)], { wob: 0.3 });
+  pFill([P(-0.02, -0.18), P(0.12, -0.32), P(0.18, -0.19)], { wob: 0.2 });
+  pHole(...P(0.33, -0.04), 0.035 * s, 0.9);
+  pCut(curve([P(0.22, -0.14), P(0.18, 0), P(0.22, 0.13)], false, 5), 0.9, 0.7);
+  for (let i = 0; i < 3; i++) { const u = -0.22 + i * 0.13; pCut([P(u, -0.1), P(u + 0.08, 0.1)], 0.8, 0.55); pCut([P(u + 0.08, -0.1), P(u, 0.1)], 0.8, 0.55); }
+}
+/* a river of three hand-painted wavy lines, entering from the right edge */
+function riverLines(x0, x1, ys, key) {
+  const r = rngFor('river:' + key), out = [];
+  ys.forEach((yc, k) => {
+    let x = x1 + 10;
+    const pts = [];
+    for (; x >= x0 - 4; x -= 6) pts.push([x, yc + Math.sin(x * 0.052 + k * 1.7) * 4.2 + Math.sin(x * 0.013 + k) * 3]);
+    // paint it in several strokes, as the stick runs dry and is reloaded
+    let i = 0;
+    while (i < pts.length - 2) { const n = Math.min(pts.length - i, 34 + (r() * 22 | 0)); pLine(pts.slice(i, i + n), 2.7, {}); i += n - 2; }
+    out.push(pts);
+  });
+  return out;
+}
+function seedling(x, y, h) {
+  pLine([[x, y], [x + 0.5, y - h]], 1.8, { dry: false, end: 0.45 });
+  pLine(curve([[x, y - 0.1 * h], [x - 0.22 * h, y - 0.5 * h], [x - 0.46 * h, y - 0.78 * h]], false, 4), 1.5, { dry: false, end: 0.4 });
+  pLine(curve([[x, y - 0.1 * h], [x + 0.22 * h, y - 0.5 * h], [x + 0.46 * h, y - 0.8 * h]], false, 4), 1.5, { dry: false, end: 0.4 });
+  pLine([[x - 0.35 * h, y + 1], [x + 0.35 * h, y + 1]], 1.3, { dry: false, end: 0.5, alpha: 0.8 });
+}
+/* palm: ringed trunk, feathery fronds */
+function palm(x, y, H, face, key) {
+  const r = rngFor('palm:' + key), topP = [x + face * H * 0.12, y - H];
+  const trunk = curve([[x, y], [x + face * H * 0.02, y - H * 0.4], [x + face * H * 0.08, y - H * 0.75], topP], false, 10);
+  pLine(trunk, 6, { dry: false, end: 0.75, vary: 0.08 });
+  palm.last = trunk;
+  for (let i = 3; i < trunk.length - 3; i += 3) { const [px, py] = trunk[i]; pCut([[px - 3.2, py], [px + 3.2, py - 1]], 0.9, 0.6); }
+  for (let k = 0; k < 9; k++) {
+    const a = lerp(-2.0, 2.0, k / 8) + (r() - 0.5) * 0.12, len = H * range(r, 0.3, 0.36), sa = Math.sin(a);
+    const fr = [];
+    for (let t = 0; t <= 1.0001; t += 1 / 16) fr.push([topP[0] + sa * len * t * 1.05, topP[1] - Math.cos(a) * len * t * 0.8 - len * 0.32 * t + len * 0.75 * t * t * (0.35 + Math.abs(sa))]);
+    pLine(fr, 2.2, { dry: false, end: 0.4 });
+    for (let i = 2; i < fr.length - 1; i++) {
+      const [px, py] = fr[i], [qx, qy] = fr[i + 1], d = Math.atan2(qx - px, -(qy - py)), l = 10.5 * (1 - i / fr.length * 0.55);
+      for (const sd of [-1, 1]) pLine([[px, py], [px + Math.sin(d + sd * 0.75) * l, py - Math.cos(d + sd * 0.75) * l]], 1.25, { dry: false, end: 0.35, trem: 0.1 });
+    }
+  }
+  for (let i = 0; i < 4; i++) pDot(topP[0] + (i - 1.5) * 4, topP[1] + 6 + (i % 2) * 2, 2.6);
+}
+/* border band: two ruled lines painted in several strokes, triangles and dots between */
+function borderBand(y0, y1, key, gap) {
+  const r = rngFor('border:' + key);
+  for (const yy of [y0, y1]) {
+    let x = -10;
+    while (x < FW + 10) {
+      const len = range(r, 170, 300), dy = (r() - 0.5) * 1.6;
+      pLine([[x, yy + dy], [x + len * 0.5, yy + dy + (r() - 0.5) * 1.2], [x + len + 6, yy + dy + (r() - 0.5) * 1.2]], 2.9, { dry: true, trem: 0.45 });
+      x += len;
+    }
+  }
+  const tw = 24, th = (y1 - y0) - 13, pitch = 36;
+  for (let x = 16; x < FW - 10; x += pitch) {
+    const cx = x + (r() - 0.5) * 3.5;
+    if (gap && cx > gap[0] - 20 && cx < gap[1] + 20) continue;
+    const tw2 = tw + (r() - 0.5) * 3.5, th2 = th + (r() - 0.5) * 3;
+    pFill([[cx - tw2 / 2, y1 - 4 + (r() - 0.5)], [cx + tw2 / 2, y1 - 4 + (r() - 0.5) * 1.5], [cx + (r() - 0.5) * 3, y1 - 4 - th2]], { wob: 0.6 });
+    pDot(cx + pitch / 2, y0 + 8 + (r() - 0.5) * 1.5, 2.3);
+  }
+}
+function title(txt, x, y, size) {
+  const L = lettering(txt, x, y, size, { track: 2.6, key: 'title', wob: 0.3 });
+  for (const st of L.strokes) pLine(st, 3.0, { dry: false, trem: 0.25, end: 0.8, start: 1.18 });
+  return L;
+}
+</script>
+<script>
+/* ── the tarpa dance ──────────────────────────────────────────────────────────
+   Dancers stand on an Archimedean spiral, feet toward the centre and heads out,
+   hands linked with their neighbours; the tarpa player stands upright inside. */
+function tarpaPlayer(x, y, S, face) {
+  const L = (lx, ly) => [x + face * lx * S, y + ly * S];
+  const man = warliPerson(PG, x, y, S, 0, { face, key: 'tarpa', ll: [0.42, -0.5], rl: [0.46, -0.58],
+    lhT: L(0.2, -0.8), rhT: L(0.42, -0.72), elbL: -1, elbR: 1 });
+  pLine([L(0.08, -0.9), L(0.18, -0.87)], 2.4, { dry: false });
+  pFill(ellipsePts(...L(0.24, -0.85), 0.085 * S, 0.058 * S, 26, face * 0.3), {});
+  const horn = bezier(L(0.3, -0.82), L(0.62, -0.8), L(0.9, -0.52), L(0.88, -0.92), 28);
+  pLine(horn, 3.6, { dry: false, start: 1.35, end: 1.25, vary: 0.06 });
+  const e = horn[horn.length - 1], e2 = horn[horn.length - 4];
+  const d = Math.atan2(e[0] - e2[0], -(e[1] - e2[1])), fw = 0.1 * S;
+  pFill([addv(e2, [-Math.cos(d) * 2, -Math.sin(d) * 2]), addv(e2, [Math.cos(d) * 2, Math.sin(d) * 2]),
+         addv(e, [Math.sin(d) * 5 + Math.cos(d) * fw, -Math.cos(d) * 5 + Math.sin(d) * fw]),
+         addv(e, [Math.sin(d) * 5 - Math.cos(d) * fw, -Math.cos(d) * 5 - Math.sin(d) * fw])], { wob: 0.35 });
+  for (let i = 0; i < 3; i++) pCut([horn[5 + i * 5 - 1], horn[5 + i * 5 + 1]].map(p => addv(p, [0, 0])), 0.8, 0.4);
+  return man;
+}
+function tarpaDance(cx, cy, S, o = {}) {
+  const r = rngFor('dance'), rIn = o.rIn ?? 1.32 * S, pitch = o.pitch ?? 1.22 * S, turns = o.turns ?? 1.85;
+  const phi0 = o.phi0 ?? 0, spacing = o.spacing ?? 0.9 * S, shY = RIG.shY * S;
+  const rAt = th => rIn + pitch * th / TAU;
+  const ths = [];
+  for (let th = o.th0 ?? 0.3; th < turns * TAU; th += spacing / (rAt(th) + shY)) ths.push(th);
+  const D = ths.map((th, i) => {
+    const phi = phi0 + th, rr = rAt(th);
+    const woman = r() < 0.5, j = (r() - 0.5) * 0.12;
+    return { x: cx + Math.cos(phi) * rr, y: cy + Math.sin(phi) * rr, ang: phi + Math.PI / 2,
+      pose: { face: 1, woman, key: 'dancer' + i, ll: [0.3 + j, 0.14], rl: [0.62 - j, -0.98], footDir: 0.15 } };
+  });
+  const geo = D.map(d => warliPerson(PG, d.x, d.y, S, d.ang, Object.assign({ noDraw: true }, d.pose)));
+  for (let i = 0; i < D.length - 1; i++) {
+    const a = geo[i].shoulders[1], b = geo[i + 1].shoulders[0], m = midv(a, b);
+    const dx = cx - m[0], dy = cy - m[1], dl = Math.hypot(dx, dy);
+    const t = [m[0] + dx / dl * 0.08 * S, m[1] + dy / dl * 0.08 * S];
+    D[i].pose.rhT = t; D[i + 1].pose.lhT = t;
+  }
+  D[0].pose.la = [2.45, 0.5];
+  D[D.length - 1].pose.ra = [2.55, -0.35];
+  for (const d of D) warliPerson(PG, d.x, d.y, S, d.ang, d.pose);
+  const last = D[D.length - 1], lg = warliPerson(PG, last.x, last.y, S, last.ang, Object.assign({ noDraw: true }, last.pose));
+  const h = lg.hands[1], el = lg.elbows[1], dd = [h[0] - el[0], h[1] - el[1]], dl = Math.hypot(...dd);
+  const tip = addv(h, [dd[0] / dl, dd[1] / dl], 0.3 * S);
+  pLine([h, tip], 1.8, { dry: false, end: 0.5 });
+  for (let k = -2; k <= 2; k++) pLine([tip, addv(tip, [dd[0] / dl * 7 + k * 2.2 * dd[1] / dl, dd[1] / dl * 7 - k * 2.2 * dd[0] / dl])], 1.1, { dry: false, end: 0.3 });
+  tarpaPlayer(cx - 0.32 * S * 1.1, cy + 0.47 * S * 1.1, S * 1.1, 1);
+  return { count: D.length, outer: rAt(turns * TAU) + S };
+}
+
+/* ── more village life ───────────────────────────────────────────────────── */
+function goat(x, y, s, face, key) {
+  const P = (lx, ly) => [x + face * lx * s, y + ly * s], lw = 0.05 * s;
+  for (const [hx, a, k] of [[0.36, 0.12, -0.08], [0.3, -0.14, 0.1], [-0.36, -0.16, 0.3], [-0.3, 0.12, 0.12]]) {
+    const hip = P(hx, -0.46), kn = addv(hip, [face * Math.sin(a) * 0.23 * s, Math.cos(a) * 0.23 * s]);
+    pLine([hip, kn, addv(kn, [face * Math.sin(a + k) * 0.23 * s, Math.cos(a + k) * 0.23 * s])], lw, { dry: false });
+  }
+  pFill([P(0.44, -0.84), P(0.44, -0.44), P(-0.03, -0.62)], {});
+  pFill([P(-0.44, -0.82), P(-0.44, -0.46), P(0.03, -0.64)], {});
+  pFill([P(0.36, -0.82), P(0.5, -1.02), P(0.76, -0.88), P(0.7, -0.8), P(0.46, -0.76)], {});
+  pLine(curve([P(0.52, -1.0), P(0.44, -1.18), P(0.28, -1.22)], false, 6), lw * 1.1, { dry: false, end: 0.35 });
+  pLine(curve([P(0.58, -1.0), P(0.52, -1.16), P(0.38, -1.24)], false, 6), lw, { dry: false, end: 0.35 });
+  pLine([P(0.5, -0.96), P(0.4, -0.86)], lw * 0.9, { dry: false, end: 0.5 });
+  pLine([P(0.7, -0.82), P(0.68, -0.68)], lw * 0.9, { dry: false, end: 0.3 });
+  pLine([P(-0.44, -0.82), P(-0.5, -0.98), P(-0.46, -1.04)], lw * 1.1, { dry: false, end: 0.4 });
+  pHole(...P(0.6, -0.93), 0.03 * s, 0.85);
+}
+function haystack(x, y, w, h) {
+  pFill([[x - w / 2, y], [x + w / 2, y], [x + w * 0.1, y - h * 0.9], [x - w * 0.1, y - h * 0.9]], {});
+  for (let i = 1; i < 6; i++) { const yy = y - h * 0.9 * i / 6, hw = lerp(w / 2, w * 0.1, i / 6) - 3; pCut([[x - hw, yy], [x + hw, yy + 1]], 1.2, 0.65); }
+  pLine([[x, y - h * 0.85], [x + 1, y - h - 12]], 2.4, { dry: false }); pDot(x + 1, y - h - 13, 2.4);
+}
+function hen(x, y, s, face, chick) {
+  const P = (lx, ly) => [x + face * lx * s, y + ly * s];
+  pFill(curve([P(-0.42, -0.5), P(-0.1, -0.66), P(0.22, -0.62), P(0.36, -0.46), P(0.26, -0.28), P(-0.12, -0.24), P(-0.4, -0.34)], true, 5), { edge: 0 });
+  pDot(...P(0.34, -0.74), (chick ? 0.14 : 0.1) * s);
+  pFill([P(0.42, -0.78), P(0.54, -0.74), P(0.42, -0.7)], { wob: 0.1 });
+  if (!chick) { pFill([P(-0.36, -0.46), P(-0.62, -0.8), P(-0.58, -0.4)], { wob: 0.2 }); pDot(...P(0.32, -0.86), 0.05 * s); }
+  pLine([P(0.0, -0.26), P(0.02, 0)], chick ? 0.9 : 1.2, { dry: false }); pLine([P(0.1, -0.26), P(0.1, 0)], chick ? 0.9 : 1.2, { dry: false });
+}
+function dholPlayer(x, y, S, face) {
+  const L = (lx, ly) => [x + face * lx * S, y + ly * S];
+  const dc = L(0.2, -0.56), dl = 0.36 * S, dr = 0.1 * S;
+  const man = warliPerson(PG, x, y, S, 0, Object.assign({ face, key: 'dhol' }, stride(0.3, 0.8), { lhT: L(0.1, -0.7), rhT: L(0.42, -0.7), elbL: -1, elbR: 1 }));
+  pFill([L(0.2 - dl / S / 2, -0.56 - dr / S), L(0.2 + dl / S / 2, -0.56 - dr / S * 0.9), L(0.2 + dl / S / 2 + 0.02, -0.56), L(0.2 + dl / S / 2, -0.56 + dr / S * 0.9), L(0.2 - dl / S / 2, -0.56 + dr / S), L(0.2 - dl / S / 2 - 0.02, -0.56)], {});
+  for (let i = 0; i < 4; i++) { const u = 0.02 + i * 0.09; pCut([L(u, -0.56 - 0.085), L(u + 0.07, -0.56 + 0.085)], 0.9, 0.6); }
+  pLine([man.hands[0], L(0.02, -0.6)], 1.6, { dry: false }); pLine([man.hands[1], L(0.4, -0.6)], 1.6, { dry: false });
+  pLine([man.shoulders[0], dc, man.shoulders[1]], 1, { dry: false, alpha: 0.5 });
+}
+function kavadMan(x, y, S, face) {
+  const L = (lx, ly) => [x + face * lx * S, y + ly * S];
+  const pole = [L(-0.62, -0.84), L(0.62, -0.8)];
+  warliPerson(PG, x, y, S, 0, Object.assign({ face, key: 'kavad' }, stride(0.62, 0.8), { lhT: L(-0.1, -0.84), rhT: L(0.3, -0.82), elbL: 1, elbR: 1 }));
+  pLine(pole, 2.4, { dry: false });
+  for (const e of [0, 1]) {
+    const q = pole[e], bw = 0.2 * S, by = q[1] + 0.3 * S;
+    pLine([q, [q[0] - bw * 0.6, by]], 1, { dry: false, alpha: 0.8 }); pLine([q, [q[0] + bw * 0.6, by]], 1, { dry: false, alpha: 0.8 });
+    pFill(curve([[q[0] - bw * 0.62, by], [q[0], by + 0.14 * S], [q[0] + bw * 0.62, by]], false, 8).concat([[q[0] + bw * 0.62, by], [q[0] - bw * 0.62, by]]), {});
+    for (let i = 0; i < 3; i++) pDot(q[0] + (i - 1) * 4.2, by - 2.6, 2.1);
+  }
+}
+function basketWoman(x, y, S, face, childS) {
+  const top = y - (RIG.headY + RIG.headR) * S, bw = 0.28 * S;
+  const pose = Object.assign({ face, woman: true, key: 'basketw' }, stride(0.9, 0.8));
+  pose.lhT = [x - face * bw * 0.45, top - 0.05 * S]; pose.elbL = -1;
+  if (childS) pose.rhT = [x + face * 0.38 * S, y - 0.4 * S];
+  warliPerson(PG, x, y, S, 0, pose);
+  pFill([[x - bw / 2, top - 0.09 * S], [x + bw / 2, top - 0.09 * S], [x + bw * 0.3, top - 0.005 * S], [x - bw * 0.3, top - 0.005 * S]], {});
+  for (let i = 0; i < 5; i++) pDot(x + (i - 2) * 0.052 * S, top - 0.12 * S - (i % 2) * 0.03 * S, 0.034 * S);
+  if (childS) {
+    const cx = x + face * 0.6 * S;
+    warliPerson(PG, cx, y, childS, 0, Object.assign({ face, key: 'child' }, stride(0.45, 0.9), { lhT: [x + face * 0.38 * S, y - 0.4 * S], elbL: 1, ra: [2.4, 0.4] }));
+  }
+}
+function well(x, y) {
+  const w = 86, h = 30, L = x - w / 2, R = x + w / 2, T = y - h;
+  pLine([[L, y], [L, T], [R, T], [R, y]], 3, { dry: false });
+  pRing(x, T - 1, w / 2 + 4, 7, 3);
+  for (let i = 0; i < 2; i++) pLine(curve([[x - 22 + i * 8, T - 1 + i * 2 - 1], [x - 8 + i * 8, T - 3 + i * 2], [x + 8 + i * 6, T + i * 2], [x + 20 + i * 4, T - 2 + i * 2]], false, 5), 1.3, { dry: false, alpha: 0.85 });
+  for (let row = 0; row < 3; row++) for (let i = 0; i < 5; i++) {
+    const bx = L + 7 + i * 16 + (row % 2) * 8; if (bx > R - 9) continue;
+    pLine([[bx, T + 7 + row * 8], [bx + 9, T + 7 + row * 8]], 1.8, { dry: false });
+  }
+  const ph = 66, pl = [L + 8, T], pr = [R - 8, T], tl = [L + 10, T - ph], tr = [R - 10, T - ph];
+  pLine([pl, tl], 2.6, { dry: false }); pLine([pr, tr], 2.6, { dry: false });
+  pLine([addv(tl, [-6, 0]), addv(tr, [6, 0])], 2.8, { dry: false });
+  const pul = [x, T - ph + 9];
+  pRing(pul[0], pul[1], 6, 6, 1.8); pDot(pul[0], pul[1], 1.8);
+  pLine([[x - 5, pul[1] + 2], [x - 5, T + 10]], 1.2, { dry: false, alpha: 0.85 });
+  return { pul, T, R, L };
+}
+function wellScene(x, y, S) {
+  const w = well(x, y);
+  const px = w.R + 0.34 * S;
+  const ropeEnd = [px + 0.1 * S, y - 0.62 * S];
+  pLine([[w.pul[0] + 5, w.pul[1] + 1], [px + 0.02 * S, y - 0.8 * S], ropeEnd], 1.2, { dry: false, alpha: 0.9 });
+  warliPerson(PG, px, y, S, 0, { face: -1, woman: true, key: 'puller', lean: -0.12, ll: [0.32, -0.3], rl: [0.2, 0.2],
+    lhT: [px + 0.02 * S, y - 0.8 * S], rhT: [px + 0.08 * S, y - 0.68 * S], elbL: 1, elbR: -1 });
+  const pg = potGeom(w.L - 0.36 * S, y, S);
+  warliPerson(PG, pg.x, y, S, 0, { face: 1, woman: true, key: 'waiter', ll: [0.14, -0.1], rl: [0.14, -0.1], la: [0.4, -0.6], rhT: [pg.x + pg.rx * 0.95, pg.cy + pg.ry * 0.1], elbR: -1 });
+  drawPot(pg, false);
+}
+
+/* two women pounding grain in an ukhal (mortar) with long musal pestles, in turn */
+function pounders(x, y, S) {
+  pFill([[x - 0.13 * S, y - 0.2 * S], [x + 0.13 * S, y - 0.2 * S], [x + 0.05 * S, y - 0.1 * S], [x + 0.1 * S, y], [x - 0.1 * S, y], [x - 0.05 * S, y - 0.1 * S]], {});
+  for (const f of [1, -1]) {
+    const wx = x - f * 0.44 * S, up = f > 0;
+    const bot = up ? [x - f * 0.05 * S, y - 0.46 * S] : [x - f * 0.01 * S, y - 0.19 * S];
+    const top = up ? [x - f * 0.1 * S, y - 1.3 * S] : [x - f * 0.05 * S, y - 1.02 * S];
+    pLine([bot, top], 2.6, { dry: false, end: 0.9 });
+    const h1 = midv(bot, top, up ? 0.5 : 0.55), h2 = midv(bot, top, up ? 0.62 : 0.68);
+    warliPerson(PG, wx, y, S, 0, { face: f, woman: true, key: 'pound' + f, ll: [0.2, -0.16], rl: [0.24, -0.2], lhT: h2, rhT: h1, elbL: -1, elbR: -1 });
+  }
+  for (let i = 0; i < 5; i++) pDot(x + (i - 2) * 5, y - 0.22 * S - 2 - (i % 2) * 2, 1.2);
+}
+function fisherman(x, y, S) {
+  const tip = [x + 1.45 * S, y - 1.0 * S];
+  const man = warliPerson(PG, x, y, S, 0, { face: 1, key: 'fisher', ll: [0.18, -0.18], rl: [0.3, -0.36], rhT: [x + 0.34 * S, y - 0.66 * S], lhT: [x + 0.24 * S, y - 0.58 * S], elbL: -1, elbR: -1 });
+  pLine(curve([man.hands[0], midv(man.hands[0], tip, 0.5), tip], false, 6).map((q, i, arr) => [q[0], q[1] - Math.sin(i / (arr.length - 1) * Math.PI) * 5]), 2, { dry: false, end: 0.5 });
+  pLine([tip, [tip[0] + 3, y + 0.52 * S]], 0.9, { dry: false, alpha: 0.75, trem: 0.2 });
+  pFill([[x - 0.42 * S, y - 0.2 * S], [x - 0.18 * S, y - 0.2 * S], [x - 0.22 * S, y], [x - 0.38 * S, y]], {});
+  pCut([[x - 0.4 * S, y - 0.12 * S], [x - 0.2 * S, y - 0.12 * S]], 0.9, 0.6);
+}
+
+/* ── the composition ─────────────────────────────────────────────────────── */
+const HS = 64;           // adult height in px: dancers, farmers, women all share it
+function paintScene() {
+  borderBand(18, 62, 'top', [960 - 150, 960 + 150]);
+  borderBand(1018, 1062, 'bot');
+  title('PAINT IT BACK', 960, 41, 20);
+  for (const s of [-1, 1]) { pDot(960 + s * 166, 41, 2.6); pDot(960 + s * 180, 41, 1.8); }
+
+  // left: sun, the big tree and its birds, homes, the women's work
+  sun(96, 146, 28);
+  const perches = bigTree(360, 612, 510, 'big', { depth: 7, spread: 0.46, rx: 0.4, ry: 0.4, cy: 0.62, leafDepth: 4 });
+  // birds on short bare twigs sticking out of the crown's edge, where they read against the wall
+  const edgeAt = (y0, sd) => { let best = null; for (const q of perches.leaves) if (Math.abs(q[1] - y0) < 9 && (!best || sd * (q[0] - best[0]) > 0)) best = q; return best; };
+  for (const [y0, sd] of [[236, -1], [178, 1], [300, 1]]) {
+    const e = edgeAt(y0, sd); if (!e) continue;
+    const a = [e[0] - sd * 10, e[1] + 2], b = [e[0] + sd * 30, e[1] - 5];
+    pLine([a, midv(a, b, 0.5), b], 2, { dry: false, end: 0.5 });
+    bird(b[0] - sd * 12, midv(a, b, 0.7)[1] - 0.5, 18, sd);
+  }
+  goat(200, 706, 31, 1, 'g1'); goat(262, 716, 28, -1, 'g2');
+  hutSquare(96, 884, 118, 70, 58, 'a');
+  hutRound(262, 884, 46, 60, 'b');
+  grinder(404, 886, HS, 'grinder');
+  rooster(126, 704, 23, 1);
+  for (let i = 0; i < 6; i++) pDot(92 - i * 8 + (i % 2) * 3, 706 + (i % 3) * 2, 1.2);
+  haystack(52, 1000, 64, 70);
+  hen(150, 1000, 17, 1); for (let i = 0; i < 3; i++) hen(180 + i * 15, 1001, 9, 1, true);
+  womanWithPot(476, 996, HS, 1, 0.05, 'pot1');
+  womanWithPot(566, 994, HS, 1, 0.38, 'pot2', false);
+  womanWithPot(656, 997, HS, 1, 0.7, 'pot3');
+
+  pounders(468, 476, HS);
+
+  // centre: the dance, a little procession coming to it, birds over it
+  const dance = tarpaDance(800, 552, HS, { phi0: -2.2 });
+  dholPlayer(624, 206, HS, 1);
+  kavadMan(718, 204, HS, 1);
+  basketWoman(818, 206, HS, 1, 40);
+  bird(958, 120, 19, 1, true); bird(1006, 156, 16, 1, true); bird(1046, 104, 17, 1, true);
+
+  // right: forest and deer, ploughing, the paddy, the well, the river
+  bigTree(1520, 330, 250, 'f1', { depth: 6, trunk: 0.3, w: 7.5, rx: 0.34, ry: 0.36, style: 'strokes', leaf: 0.85 });
+  palm(1690, 334, 240, 1, 'p1');
+  bigTree(1852, 332, 230, 'f2', { depth: 6, trunk: 0.32, w: 7, rx: 0.3, ry: 0.35, leaf: 0.8 });
+  deer(1608, 334, 42, -1, { antlers: true });
+  deer(1768, 336, 38, 1, { graze: true });
+  palm(1262, 440, 300, -1, 'p2');
+  { // a toddy tapper climbing it, a pot at his waist
+    const tr = palm.last, at = f => tr[Math.round(f * (tr.length - 1))];
+    const hp = at(0.52), S = HS, fx = hp[0] + 0.25 * S, fy = hp[1] + 0.3 * S;
+    const man = warliPerson(PG, fx, fy, S, 0, { face: -1, key: 'tapper', lean: 0.12,
+      lhT: addv(at(0.69), [3, 0]), rhT: addv(at(0.63), [3, 0]), elbL: 1, elbR: 1,
+      lfT: addv(at(0.43), [3, 0]), rfT: addv(at(0.49), [4, 0]), ll: [0.3, -0.6], rl: [0.3, -0.6] });
+    const w = man.waist; pLine([w, [w[0] + 8, w[1] + 8]], 1, { dry: false, alpha: 0.8 });
+    pFill(ellipsePts(w[0] + 10, w[1] + 13, 5.5, 5, 18), {}); pLine([[w[0] + 6, w[1] + 8], [w[0] + 13, w[1] + 8]], 1.6, { dry: false });
+  }
+
+
+  ploughTeam(1140, 552, HS);
+  const fr = rngFor('field');
+  const fx0 = 1452, fx1 = 1880, fy0 = 612, fy1 = 806;
+  const bund = [[fx0 + 2, fy0 + 2], [fx0 + 120, fy0 - 3], [fx0 + 260, fy0 - 6], [fx1 + 4, fy0 - 4], [fx1 + 10, fy0 + 90], [fx1 + 16, fy1 + 2], [fx0 + 250, fy1 + 7], [fx0 + 100, fy1 + 5], [fx0 - 14, fy1 + 1], [fx0 - 6, fy0 + 100], [fx0 + 2, fy0 + 2]];
+  for (let i = 0; i < bund.length - 1; i += 2) pLine(bund.slice(i, i + 3), 2.8, { dry: false, trem: 0.5 });
+  pLine(curve([[fx0 + 236, fy0 - 5], [fx0 + 226, fy0 + 100], [fx0 + 238, fy1 + 6]], false, 8), 2.4, { dry: false });
+  for (let row = 0; row < 7; row++) {
+    const y0 = fy0 + 34 + row * 25;
+    for (let x = fx0 + 14 - (row % 2) * 9; x < fx1 + 2; x += 19 + fr() * 3) {
+      const y = y0 + Math.sin(x * 0.012 + row) * 3 + (fr() - 0.5) * 3;
+      if (Math.abs(x - (fx0 + 232)) < 11) continue;
+      if (Math.hypot(x - 1590, y - 700) < 44 || Math.hypot(x - 1772, y - 752) < 44) continue;
+      seedling(x + (fr() - 0.5) * 3, y, 12 + fr() * 3.5);
+    }
+  }
+  warliPerson(PG, 1590, 718, HS, 0, { face: -1, woman: true, key: 'trans1', lean: 1.12, ll: [0.26, -0.12], rl: [0.26, -0.12], lhT: [1562, 712], rhT: [1556, 716] });
+  warliPerson(PG, 1772, 770, HS, 0, { face: 1, woman: true, key: 'trans2', lean: 1.05, ll: [0.26, -0.1], rl: [0.28, -0.14], lhT: [1800, 764], rhT: [1806, 768] });
+  wellScene(1240, 846, HS);
+
+  riverLines(1060, FW, [920, 956, 992], 'r');
+  fisherman(1000, 906, HS);
+  const fsh = [[1140, 938, 1], [1300, 974, -1], [1440, 938, 1], [1580, 974, 1], [1700, 938, -1], [1830, 974, -1], [1880, 938, 1]];
+  for (const [x, y, f] of fsh) fish(x, y, 30, f, (f > 0 ? -0.06 : 0.06));
+  return dance;
+}
+</script>
+<script>
+/* ── the wall, the rain, the composite ───────────────────────────────────── */
+/* a smooth field sampled on a coarse grid and bilinearly upsampled */
+function field(W, H, step, fn) {
+  const gw = Math.ceil(W / step) + 2, gh = Math.ceil(H / step) + 2, G = new Float32Array(gw * gh);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) G[j * gw + i] = fn(i * step, j * step);
+  const out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const fy = y / step, j = fy | 0, v = fy - j;
+    for (let x = 0; x < W; x++) {
+      const fx = x / step, i = fx | 0, u = fx - i, k = j * gw + i;
+      const a = G[k] + (G[k + 1] - G[k]) * u, b = G[k + gw] + (G[k + gw + 1] - G[k + gw]) * u;
+      out[y * W + x] = a + (b - a) * v;
+    }
+  }
+  return out;
+}
+function makeWall(W, H) {
+  const n1 = makeNoise('wall:lo'), n2 = makeNoise('wall:mid'), n3 = makeNoise('wall:fine'), n4 = makeNoise('wall:relief'), n5 = makeNoise('wall:patch');
+  const lo = field(W, H, 8, (x, y) => fbm(n1, x / 360, y / 360, 3));
+  const mid = field(W, H, 4, (x, y) => fbm(n2, x / 90, y / 90, 3));
+  const patch = field(W, H, 8, (x, y) => fbm(n5, x / 170 + 9, y / 170, 3));
+  const hgt = field(W, H, 2, (x, y) => { const m = smooth(-0.25, 0.35, n4(x / 260 + 7, y / 260)); return fbm(n4, x / 34, y / 34, 3) * 26 + (n4(x / 12 + 40, y / 12) * 7 + n4(x / 5 + 90, y / 5) * 2.4) * (0.25 + 0.75 * m); });
+  const n6 = makeNoise('wall:repair'), rep = field(W, H, 4, (x, y) => fbm(n6, x / 210, y / 210, 3));
+  const DARK = rgb('#8e3f25'), LIGHT = rgb('#a9542f'), DEEP = rgb('#6f311d');
+  const c = cv(W, H), g = ctxOf(c), img = g.createImageData(W, H), d = img.data;
+  const relief = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const light = 1.035 - 0.15 * y / H;
+    for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      const t = clamp(0.5 + 0.75 * lo[i] + 0.42 * mid[i]);
+      let r = lerp(DARK[0], LIGHT[0], t), gg = lerp(DARK[1], LIGHT[1], t), b = lerp(DARK[2], LIGHT[2], t);
+      const dp = smooth(0.08, 0.42, patch[i]) * 0.55;
+      r = lerp(r, DEEP[0], dp); gg = lerp(gg, DEEP[1], dp); b = lerp(b, DEEP[2], dp);
+      const grain = (hash2(x, y, 1) - 0.5) * 0.075 + (hash2(x >> 1, y >> 1, 2) - 0.5) * 0.05 + n3(x / 6, y / 6) * 0.05;
+      const rp = smooth(0.2, 0.235, rep[i]), lip = 1 - Math.abs(2 * smooth(0.19, 0.245, rep[i]) - 1);
+      const L = light * (1 + grain) * (1 + 0.025 * (1 - x / W)) * (1 + 0.055 * rp - 0.05 * lip);
+      d[i * 4] = r * L; d[i * 4 + 1] = gg * L; d[i * 4 + 2] = b * L; d[i * 4 + 3] = 255;
+      const xl = x > 0 ? i - 1 : i, xr = x < W - 1 ? i + 1 : i, yu = y > 0 ? i - W : i, yd = y < H - 1 ? i + W : i;
+      relief[i] = 0.5 * ((hgt[xr] - hgt[xl]) * 0.55 + (hgt[yd] - hgt[yu]) * 0.7);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  // the plasterer's hand: faint fans of finger ridges, fading at both ends
+  const r = rngFor('wall:sweeps'), nsw = makeNoise('wall:sweep');
+  g.lineCap = 'round';
+  for (let k = 0; k < 90; k++) {
+    const cx = r() * W, cy = r() * H, R = range(r, 50, 150), a0 = r() * TAU, span = range(r, 0.45, 1.0), gap = range(r, 4, 7);
+    for (let j = 0; j < 4; j++) {
+      const pts = [];
+      for (let t = 0; t <= 16; t++) { const a = a0 + span * t / 16, rr = R + j * gap + 7 * nsw(k * 3.1 + j * 0.3, t / 7); pts.push([cx + Math.cos(a) * rr, cy + Math.sin(a) * rr]); }
+      const gr = g.createLinearGradient(pts[0][0], pts[0][1], pts[16][0], pts[16][1]), col = j % 2 ? '40,12,4' : '255,205,160';
+      const al = j % 2 ? 0.055 : 0.05;
+      gr.addColorStop(0, `rgba(${col},0)`); gr.addColorStop(0.5, `rgba(${col},${al})`); gr.addColorStop(1, `rgba(${col},0)`);
+      g.strokeStyle = gr; g.lineWidth = range(r, 1.6, 3.4);
+      g.beginPath(); trace(g, pts, false); g.stroke();
+    }
+  }
+  // straw and husk fibres in the dung plaster
+  for (let k = 0; k < 4200; k++) {
+    const x = r() * W, y = r() * H, a = r() * TAU, l = range(r, 2.5, 9);
+    g.strokeStyle = r() < 0.55 ? `rgba(215,158,98,${range(r, 0.1, 0.28)})` : `rgba(45,16,8,${range(r, 0.1, 0.26)})`;
+    g.lineWidth = range(r, 0.6, 1.1);
+    g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a) * l * 0.5 + range(r, -1, 1), y + Math.sin(a) * l * 0.5 + range(r, -1, 1), x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke();
+  }
+  // pits and grit
+  for (let k = 0; k < 3200; k++) {
+    const x = r() * W, y = r() * H, s = range(r, 0.5, 1.6);
+    g.fillStyle = `rgba(45,15,6,${range(r, 0.18, 0.4)})`; g.beginPath(); g.arc(x, y, s, 0, TAU); g.fill();
+    g.fillStyle = 'rgba(255,200,160,0.09)'; g.beginPath(); g.arc(x + s * 0.5, y + s * 0.6, s * 0.7, 0, TAU); g.fill();
+  }
+  return { data: g.getImageData(0, 0, W, H).data, relief };
+}
+
+/* where the rain has reached: vertical runs from the top, a damp head, first drops */
+function makeWet(W, H) {
+  const c = cv(W, H), g = ctxOf(c), r = rngFor('wet:runs'), nn = makeNoise('wet:meander');
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  g.globalCompositeOperation = 'lighten';
+  const X0 = 1250;
+  const head = []; for (let x = X0 - 60; x <= W + 10; x += 8) head.push([x, 4 + 30 * smooth(X0 - 40, W, x) * (0.6 + 0.8 * (nn(x / 70, 3.3) + 0.5))]);
+  g.fillStyle = 'rgb(175,175,175)'; g.beginPath(); g.moveTo(X0 - 60, -5); head.forEach(p => g.lineTo(p[0], p[1])); g.lineTo(W + 10, -5); g.closePath(); g.fill();
+  const runs = [];
+  for (let i = 0; i < 40; i++) {
+    const u = Math.pow(r(), 0.8), x0 = lerp(X0 - 20, W + 25, u), k = clamp((x0 - X0) / 600);
+    const w0 = range(r, 7, 18) + k * range(r, 2, 38) * (r() < 0.25 ? 1.8 : 1), len = lerp(90, 1110, clamp(0.06 + 0.94 * k * range(r, 0.35, 1.2)));
+    const wet = range(r, 0.62, 1), L = [], R = [];
+    for (let y = -10; y <= len; y += 5) {
+      const s = y / len, cxx = x0 + 10 * nn(i * 3.1, y / 160) + 3.5 * nn(i * 7.3 + 50, y / 36);
+      const hw = w0 / 2 * (0.78 + 0.5 * (nn(i * 5.7 + 90, y / 110) + 0.5)) * lerp(1, 0.52, smooth(0.62, 1, s));
+      L.push([cxx - hw, y]); R.push([cxx + hw, y]);
+    }
+    const lb = L[L.length - 1], rb = R[R.length - 1], bx = (lb[0] + rb[0]) / 2, br = Math.max(3.5, (rb[0] - lb[0]) / 2 * 1.3);
+    const v = Math.round(255 * wet);
+    g.fillStyle = `rgb(${v},${v},${v})`;
+    g.beginPath(); trace(g, L.concat(R.reverse()), true); g.fill();
+    g.beginPath(); g.ellipse(bx, len + br * 0.35, br, br * 1.15, 0, 0, TAU); g.fill();
+    runs.push({ x0, len, w0 });
+  }
+  // thin trickles threading between the broad runs
+  for (let i = 0; i < 14; i++) {
+    const x0 = lerp(X0 + 10, W - 10, r()), len = range(r, 160, 900) * (0.5 + 0.5 * clamp((x0 - X0) / 500)), hw = range(r, 2.2, 3.6), P2 = [];
+    for (let y = -5; y <= len; y += 5) P2.push([x0 + 7 * nn(i * 9.7 + 300, y / 90) + 2 * nn(i * 4.1 + 400, y / 20), y]);
+    g.strokeStyle = 'rgb(255,255,255)'; g.lineWidth = hw * 2; g.lineCap = 'round'; g.lineJoin = 'round';
+    g.beginPath(); trace(g, P2, false); g.stroke();
+    const e = P2[P2.length - 1]; g.fillStyle = '#fff'; g.beginPath(); g.ellipse(e[0], e[1] + 2, hw * 1.7, hw * 2.1, 0, 0, TAU); g.fill();
+  }
+  const src = g.getImageData(0, 0, W, H).data;
+  let M = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) M[i] = src[i * 4] / 255;
+  M = blurF(M, W, H, 3, 3, 2);
+  const ns = makeNoise('wet:streak'), ne = makeNoise('wet:edge');
+  const streak = field(W, H, 2, (x, y) => ns(x / 9, y / 70) * 0.6 + ns(x / 3 + 17, y / 25) * 0.4);
+  const edge = field(W, H, 2, (x, y) => ne(x / 7, y / 7));
+  for (let i = 0; i < W * H; i++) {
+    const m = M[i];
+    if (m <= 0.001) continue;
+    M[i] = clamp(smooth(0.18, 0.8, m + 0.22 * edge[i]) * (0.86 + 0.28 * streak[i]));
+  }
+  // the first drops: scattered dark spots ahead of the runs
+  const c2 = cv(W, H), g2 = ctxOf(c2), rd = rngFor('wet:drops');
+  g2.fillStyle = '#000'; g2.fillRect(0, 0, W, H);
+  for (let k = 0; k < 1400; k++) {
+    const x = lerp(980, W, Math.pow(rd(), 0.65)), y = rd() * H;
+    if (rd() > smooth(980, 1420, x)) continue;
+    const s = range(rd, 1.4, 4.6), v = Math.round(255 * range(rd, 0.55, 0.95));
+    g2.fillStyle = `rgb(${v},${v},${v})`;
+    g2.beginPath(); g2.ellipse(x, y, s, s * range(rd, 1, 1.35), 0, 0, TAU); g2.fill();
+    if (rd() < 0.3) { g2.beginPath(); g2.ellipse(x, y + s * 1.6, s * 0.45, s * 1.2, 0, 0, TAU); g2.fill(); }
+  }
+  const s2 = g2.getImageData(0, 0, W, H).data;
+  let Dm = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) Dm[i] = s2[i * 4] / 255;
+  Dm = blurF(Dm, W, H, 1, 1, 1);
+  for (let i = 0; i < W * H; i++) if (Dm[i] > M[i]) M[i] = Dm[i];
+  return M;
+}
+
+/* paste texture: slightly ragged edges, thick and thin, pinholes where the wall is rough */
+function processPaint(W, H, pc, relief) {
+  const pd = ctxOf(pc).getImageData(0, 0, W, H).data, N = W * H;
+  const A = new Float32Array(N);
+  for (let i = 0; i < N; i++) A[i] = pd[i * 4 + 3] / 255;
+  const Ab = blurF(A, W, H, 1, 1, 1);
+  const nt = makeNoise('paint:thick'), nr = makeNoise('paint:rag');
+  const thick = field(W, H, 3, (x, y) => fbm(nt, x / 26, y / 26, 3));
+  const rag = field(W, H, 1, (x, y) => nr(x / 2.2, y / 2.2));
+  const Ap = new Float32Array(N);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, a = Ab[i];
+    if (a < 0.004) continue;
+    const e = 4 * a * (1 - a);
+    let v = smooth(0.1, 0.86, a + e * 0.55 * rag[i]);
+    v *= clamp(0.95 + 0.12 * thick[i] - 0.1 * Math.max(0, -relief[i] - 0.3) + (hash2(x, y, 9) - 0.5) * 0.08, 0.72, 1);
+    if (hash2(x, y, 11) < 0.006) v *= 0.55;
+    Ap[i] = v;
+  }
+  return Ap;
+}
+
+/* thin white drips from the lower edges of painted shapes inside the wet runs */
+function makeDrips(W, H, Ap, M) {
+  const c = cv(W, H), g = ctxOf(c), r = rngFor('drips'), nn = makeNoise('drips');
+  const cw = Math.ceil(W / 5), occ = new Uint8Array(cw * Math.ceil(H / 5));
+  let count = 0;
+  for (let x = 1120; x < W - 2; x += 2) {
+    let run = 0;
+    for (let y = 2; y < H - 4; y++) {
+      const i = y * W + x, a = Ap[i];
+      if (a > 0.5) { run++; continue; }
+      if (run >= 2 && a < 0.22) {
+        const w = M[i], cell = ((y / 5) | 0) * cw + ((x / 5) | 0);
+        if (w > 0.4 && run >= 3 && !occ[cell] && r() < (0.06 + 0.3 * w * w) * (run >= 6 ? 1.5 : 1)) {
+          const len = (6 + 105 * w * Math.pow(r(), 2.2)) * (0.45 + 0.55 * Math.min(1, run / 8));
+          const hw = range(r, 0.6, 1.25) * (0.8 + 0.3 * Math.min(1, run / 8)), a0 = range(r, 0.5, 0.85), seed = r() * 99, mw = range(r, 0.6, 2);
+          const pts = []; for (let s = 0; s <= len; s += 2) pts.push([x + mw * nn(seed, s / 30), y - 1 + s]);
+          if (pts.length > 1) {
+            g.fillStyle = `rgba(255,255,255,${a0})`;
+            g.beginPath(); trace(g, taper(pts, u => hw * (u < 0.1 ? lerp(1.9, 1, u / 0.1) : lerp(1, 0.62, (u - 0.1) / 0.9))), true); g.fill();
+            const e = pts[pts.length - 1], br = hw * range(r, 1.3, 2.2);
+            if (len > 9 && r() < 0.85) { g.fillStyle = `rgba(255,255,255,${Math.min(1, a0 + 0.12)})`;
+              g.beginPath(); g.ellipse(e[0], e[1] + br * 0.25, br, br * 1.25, 0, 0, TAU); g.fill(); }
+          }
+          for (let yy = -3; yy <= 6; yy++) for (let xx = -2; xx <= 2; xx++) { const cy = ((y / 5) | 0) + yy, cx = ((x / 5) | 0) + xx; if (cy >= 0 && cx >= 0 && cx < cw) occ[cy * cw + cx] = 1; }
+          count++;
+        }
+      }
+      run = 0;
+    }
+  }
+  const s = g.getImageData(0, 0, W, H).data, D = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) D[i] = s[i * 4 + 3] / 255;
+  return { D, count };
+}
+
+function cracks(g, W, H) {
+  const r = rngFor('cracks');
+  const walk = (x, y, a0, len, w, depth) => {
+    const pts = [[x, y]]; let a = a0;
+    for (let s = 0; s < len; s += 4) {
+      a += (r() - 0.5) * 1.1; a = lerp(a, a0, 0.3);
+      x += Math.cos(a) * 4; y += Math.sin(a) * 4; pts.push([x, y]);
+      if (depth < 2 && r() < 0.05) walk(x, y, a + (r() < 0.5 ? 1 : -1) * range(r, 0.7, 1.3), len * range(r, 0.15, 0.35), w * 0.7, depth + 1);
+    }
+    g.strokeStyle = 'rgba(255,200,165,0.09)'; g.lineWidth = w * 1.1;
+    g.beginPath(); trace(g, pts.map(([px, py]) => [px + 1, py + 1]), false); g.stroke();
+    g.strokeStyle = `rgba(35,11,5,${range(r, 0.4, 0.62)})`; g.lineWidth = w;
+    g.beginPath(); trace(g, pts, false); g.stroke();
+  };
+  g.save(); g.lineJoin = 'miter'; g.lineCap = 'butt';
+  const seeds = [[20, 640, -0.4], [512, 1078, -1.35], [1003, 690, 1.75], [1450, 1078, -1.65], [1918, 470, 3.3], [700, 70, 1.4], [120, 1078, -1.2]];
+  for (const [x, y, a] of seeds) walk(x, y, a, range(r, 70, 170), range(r, 0.8, 1.15), 0);
+  g.restore();
+}
+function rainStreaks(g, W, H) {
+  const r = rngFor('rain');
+  g.save(); g.lineCap = 'round';
+  for (let i = 0; i < 950; i++) {
+    const x = lerp(950, W + 80, Math.pow(r(), 0.6)), y = range(r, -60, H), len = range(r, 40, 140);
+    if (r() > smooth(1000, 1450, x)) continue;
+    const x2 = x - 0.19 * len, y2 = y + len, a = range(r, 0.05, 0.15);
+    const gr = g.createLinearGradient(x, y, x2, y2);
+    gr.addColorStop(0, 'rgba(232,236,238,0)'); gr.addColorStop(0.6, `rgba(232,236,238,${a})`); gr.addColorStop(1, 'rgba(232,236,238,0)');
+    g.strokeStyle = gr; g.lineWidth = range(r, 0.7, 1.5);
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x2, y2); g.stroke();
+  }
+  g.restore();
+}
+
+function draw(g, W, H) {
+  const T = [performance.now()];
+  const pc = cv(W, H); PG = ctxOf(pc);
+  const dance = paintScene(); T.push(performance.now());
+  const wall = makeWall(W, H); T.push(performance.now());
+  const M = makeWet(W, H); T.push(performance.now());
+  const Ap = processPaint(W, H, pc, wall.relief); T.push(performance.now());
+  const Av = blurF(Ap, W, H, 0, 2, 1);
+  const { D, count } = makeDrips(W, H, Ap, M); T.push(performance.now());
+  const img = g.createImageData(W, H), o = img.data, wd = wall.data, rel = wall.relief;
+  const dk = [2, 5, 9, 14, 21, 30, 42, 56], ak = [0.36, 0.27, 0.19, 0.14, 0.1, 0.07, 0.045, 0.03];
+  const ncol = makeNoise('smear:col'), sf = new Float32Array(W), son = new Float32Array(W);
+  for (let x = 0; x < W; x++) { sf[x] = 0.5 + 1.1 * (ncol(x / 11, 0.5) + 0.5); son[x] = smooth(-0.15, 0.3, ncol(x / 6 + 40, 2.5)); }
+  const nt = makeNoise('paint:tone'), tone = field(W, H, 8, (x, y) => fbm(nt, x / 120, y / 120, 2));
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x, j = i * 4, w = M[i];
+    let r = wd[j], gg = wd[j + 1], b = wd[j + 2];
+    if (w > 0.001) { r *= 1 - 0.27 * w; gg *= 1 - 0.31 * w; b *= 1 - 0.32 * w; }
+    let a = Ap[i];
+    if (w > 0.02) {
+      a = lerp(a, Av[i], 0.65 * w) * (1 - 0.44 * w);
+      let keep = 1;
+      for (let k = 0; k < 8; k++) { const yy = y - Math.round(dk[k] * sf[x]); if (yy < 0) break; keep *= 1 - ak[k] * Av[yy * W + x]; }
+      a = 1 - (1 - a) * (1 - (1 - keep) * w * (0.35 + 0.65 * son[x]));
+    }
+    const dr = D[i] * (0.55 + 0.45 * w);
+    a = 1 - (1 - a) * (1 - dr);
+    if (a > 0.001) {
+      const t = 0.955 + 0.06 * tone[i] + (hash2(x, y, 5) - 0.5) * 0.04;
+      r += (PAINT[0] * t - r) * a; gg += (PAINT[1] * t - gg) * a; b += (PAINT[2] * t * 0.99 - b) * a;
+    }
+    const sh = 1 + clamp(rel[i], -1.4, 1.4) * 0.085 * (1 - 0.35 * a);
+    o[j] = r * sh; o[j + 1] = gg * sh; o[j + 2] = b * sh; o[j + 3] = 255;
+  }
+  g.putImageData(img, 0, 0); T.push(performance.now());
+  cracks(g, W, H);
+  rainStreaks(g, W, H);
+  const vg = g.createRadialGradient(W * 0.45, H * 0.42, H * 0.35, W * 0.5, H * 0.5, W * 0.72);
+  vg.addColorStop(0, 'rgba(20,6,2,0)'); vg.addColorStop(1, 'rgba(20,6,2,0.22)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  T.push(performance.now());
+  window.__wallInfo = { dancers: dance.count, drips: count, ms: T.map((t, k) => k ? Math.round(t - T[k - 1]) : 0) };
+  console.log('wall', JSON.stringify(window.__wallInfo));
+}
+stillFrame(FW, FH, draw);
+</script>
+</body></html>

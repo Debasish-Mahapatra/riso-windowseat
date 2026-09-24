@@ -1,0 +1,1393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rivers in the Sky</title>
+<style>html,body{margin:0;background:#222} canvas{display:block;width:1280px;height:720px}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script src="kit.js"></script>
+<script>
+'use strict';
+/* RIVERS IN THE SKY: watercolour style frame, 1920 x 1080.
+   Every wash is a stack of recursively deformed polygons (Tyler Hobbs), drawn
+   at low alpha on its own layer. The layer is then treated as pigment density:
+   wet blur, edge darkening (density minus its blur), granulation and dry brush
+   against a cold-press paper heightmap. It is converted to a Beer-Lambert glaze
+   and multiplied onto the paper, so glazes mix subtractively. */
+
+const W = 1920, H = 1080, N = W * H;
+const PAPER = [248, 243, 232];
+const HZ = 486;              // eye level (vanishing line)
+const HOR = 493;             // forest horizon, dipped by the Earth's curvature
+const FL = 1500, CX = 960;   // focal length (px), principal point
+const CAM = 120;             // camera height above the canopy top (m)
+const WDROP = 14;            // river surface below the canopy top (m), painter's cheat
+let G2 = null;               // main context
+
+/* ── fast seeded gradient noise (no allocation per call) ─────────────────── */
+function gnoise(key) {
+  const r = rngFor('gn:' + key), P = new Uint8Array(512), GX = new Float32Array(256), GY = new Float32Array(256);
+  const p = new Uint8Array(256);
+  for (let i = 0; i < 256; i++) p[i] = i;
+  for (let i = 255; i > 0; i--) { const j = Math.floor(r() * (i + 1)); const t = p[i]; p[i] = p[j]; p[j] = t; }
+  for (let i = 0; i < 512; i++) P[i] = p[i & 255];
+  for (let i = 0; i < 256; i++) { const a = r() * TAU; GX[i] = Math.cos(a); GY[i] = Math.sin(a); }
+  return function (x, y) {
+    const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, X = xi & 255, Y = yi & 255;
+    const a = P[P[X] + Y], b = P[P[X + 1] + Y], c = P[P[X] + Y + 1], d = P[P[X + 1] + Y + 1];
+    const u = xf * xf * xf * (xf * (xf * 6 - 15) + 10), v = yf * yf * yf * (yf * (yf * 6 - 15) + 10);
+    const n00 = GX[a] * xf + GY[a] * yf, n10 = GX[b] * (xf - 1) + GY[b] * yf;
+    const n01 = GX[c] * xf + GY[c] * (yf - 1), n11 = GX[d] * (xf - 1) + GY[d] * (yf - 1);
+    const x1 = n00 + (n10 - n00) * u, x2 = n01 + (n11 - n01) * u;
+    return (x1 + (x2 - x1) * v) * 1.4;
+  };
+}
+
+/* A full-frame fbm field (unit-ish std 0.5), computed on a coarse grid and
+   bilinearly upsampled. Washes sample it with their own offsets. */
+function field(key, scale, oct, step) {
+  const nz = gnoise(key), gw = Math.ceil(W / step) + 2, gh = Math.ceil(H / step) + 2, Gd = new Float32Array(gw * gh);
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    let s = 0, a = 1, f = 1 / scale, nm = 0;
+    for (let o = 0; o < oct; o++) { s += a * nz(i * step * f + o * 17.13, j * step * f - o * 9.71); nm += a; a *= .5; f *= 2.03; }
+    Gd[j * gw + i] = s / nm;
+  }
+  let m = 0, m2 = 0;
+  for (let i = 0; i < Gd.length; i++) { m += Gd[i]; m2 += Gd[i] * Gd[i]; }
+  m /= Gd.length; const sd = Math.sqrt(Math.max(1e-9, m2 / Gd.length - m * m));
+  for (let i = 0; i < Gd.length; i++) Gd[i] = (Gd[i] - m) / sd * .5;
+  const out = new Float32Array(N);
+  for (let y = 0; y < H; y++) {
+    const gy = y / step, j = gy | 0, fy = gy - j;
+    for (let x = 0; x < W; x++) {
+      const gx = x / step, i = gx | 0, fx = gx - i, k = j * gw + i;
+      const a = Gd[k] + (Gd[k + 1] - Gd[k]) * fx, b = Gd[k + gw] + (Gd[k + gw + 1] - Gd[k + gw]) * fx;
+      out[y * W + x] = a + (b - a) * fy;
+    }
+  }
+  return out;
+}
+
+/* Cold-press paper: domain-warped rounded tooth (~5 px), finer grain, slow
+   sizing unevenness and a scatter of raised or sunken fibres. 0 = valley. */
+function buildPaper() {
+  const n1 = gnoise('p1'), n2 = gnoise('p2'), n3 = gnoise('p3'), nw = gnoise('pw'), nl = gnoise('pl');
+  const hm = new Float32Array(N);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const wx = x + 2.6 * nw(x * .05, y * .05), wy = y + 2.6 * nw(x * .05 + 31.3, y * .05 + 7.7);
+      const b = Math.tanh(1.15 * n1(wx / 5.2, wy / 5.2));
+      hm[y * W + x] = .56 * b + .26 * n2(wx / 2.6, wy / 2.6) + .1 * n3(x / 1.25, y / 1.25) + .12 * nl(x / 110, y / 110);
+    }
+  }
+  const fc = cv(W, H), fx = ctxOf(fc), r = rngFor('fibres');
+  fx.fillStyle = 'rgb(128,128,128)'; fx.fillRect(0, 0, W, H); fx.lineCap = 'round';
+  for (let i = 0; i < 3200; i++) {
+    const x = r() * W, y = r() * H, a = r() * TAU, L = 5 + r() * 30, bend = (r() - .5) * 1.2;
+    fx.strokeStyle = r() < .55 ? `rgba(255,255,255,${.3 + r() * .4})` : `rgba(0,0,0,${.25 + r() * .35})`;
+    fx.lineWidth = .45 + r() * .8;
+    fx.beginPath(); fx.moveTo(x, y);
+    fx.quadraticCurveTo(x + Math.cos(a + bend) * L * .5, y + Math.sin(a + bend) * L * .5, x + Math.cos(a) * L, y + Math.sin(a) * L);
+    fx.stroke();
+  }
+  const fd = fx.getImageData(0, 0, W, H).data;
+  let s = 0, s2 = 0;
+  for (let i = 0; i < N; i++) { s += hm[i]; s2 += hm[i] * hm[i]; }
+  const mean = s / N, sd = Math.sqrt(s2 / N - mean * mean);
+  for (let i = 0; i < N; i++) hm[i] = clamp(.5 + .19 * (hm[i] - mean) / sd + .16 * (fd[i * 4] - 128) / 128);
+  return hm;
+}
+
+/* ── separable box blur (2 passes ≈ gaussian) on Float32 arrays ─────────── */
+function blurPass(src, dst, w, h, r, horiz) {
+  const inv = 1 / (2 * r + 1), L = horiz ? w : h, M = horiz ? h : w, st = horiz ? 1 : w, ls = horiz ? w : 1;
+  for (let m = 0; m < M; m++) {
+    const b0 = m * ls;
+    let acc = 0;
+    for (let k = -r - 1; k < r; k++) acc += src[b0 + (k < 0 ? 0 : k > L - 1 ? L - 1 : k) * st];
+    for (let i = 0; i < L; i++) {
+      const ia = i + r, ib = i - r - 1;
+      acc += src[b0 + (ia > L - 1 ? L - 1 : ia) * st] - src[b0 + (ib < 0 ? 0 : ib) * st];
+      dst[b0 + i * st] = acc * inv;
+    }
+  }
+}
+function blur(src, w, h, r, passes = 2) {
+  r = Math.max(1, Math.round(r));
+  const a = Float32Array.from(src), b = new Float32Array(src.length);
+  for (let p = 0; p < passes; p++) { blurPass(a, b, w, h, r, true); blurPass(b, a, w, h, r, false); }
+  return a;
+}
+
+/* ── pigments: optical density per channel, granulation ──────────────────── */
+const PIG = {
+  cer: rgb('#3b8fc4'), ult: rgb('#3d4fa3'), pay: rgb('#3b4656'), sap: rgb('#5a8a2e'), hook: rgb('#2f5f3c'),
+  oli: rgb('#737a2c'), och: rgb('#c8993f'), sie: rgb('#a3552f'), rose: rgb('#c9457b'), cady: rgb('#f0c233'),
+  cadr: rgb('#c9362b'), vio: rgb('#6d4f94'),
+};
+const GRANU = { cer: .45, ult: .85, pay: .3, sap: .12, hook: .18, oli: .3, och: .45, sie: .65, rose: .08, cady: .06, cadr: .1, vio: .5 };
+function mix(m) {
+  const K = [0, 0, 0]; let G = 0, s = 0;
+  for (const k in m) {
+    const c = PIG[k], w = m[k];
+    for (let i = 0; i < 3; i++) K[i] += w * -Math.log(Math.max(c[i], 1) / 255);
+    G += w * GRANU[k]; s += w;
+  }
+  return { K: K.map(v => v / s), G: G / s };
+}
+
+/* ── Hobbs deformation ───────────────────────────────────────────────────── */
+function deform(P, V, depth, amt, r) {
+  for (let d = 0; d < depth; d++) {
+    const n = P.length, NP = new Array(n * 2), NV = new Float32Array(n * 2);
+    for (let i = 0; i < n; i++) {
+      const j = i + 1 < n ? i + 1 : 0, a = P[i], b = P[j], va = V[i], vb = V[j];
+      const dx = b[0] - a[0], dy = b[1] - a[1], s = Math.sqrt(dx * dx + dy * dy) * amt * (va + vb) * .5;
+      NP[2 * i] = a; NV[2 * i] = va;
+      NP[2 * i + 1] = [(a[0] + b[0]) * .5 + gauss(r) * s, (a[1] + b[1]) * .5 + gauss(r) * s];
+      NV[2 * i + 1] = (va + vb) * .5 * (.8 + .4 * r());
+    }
+    P = NP; V = NV;
+  }
+  return [P, V];
+}
+function polyArea(P) {
+  let a = 0;
+  for (let i = 0, n = P.length; i < n; i++) { const p = P[i], q = P[(i + 1) % n]; a += p[0] * q[1] - q[0] * p[1]; }
+  return a / 2;
+}
+function perim(P) { let s = 0; for (let i = 0; i < P.length; i++) { const p = P[i], q = P[(i + 1) % P.length]; s += Math.hypot(q[0] - p[0], q[1] - p[1]); } return s; }
+const VNZ = gnoise('vnz');
+/* Base polygon: an initial deformation, resampled to edge length E, with a
+   spatially coherent variance per vertex (so some edges stay crisp and some bleed). */
+function base(pts, key, o = {}) {
+  const r = rngFor('b:' + key);
+  let P = pts;
+  if (o.bdepth) P = deform(P, P.map(() => 1), o.bdepth, o.bamt ?? .22, r)[0];
+  const E = Math.max(1.5, Math.min(o.E ?? 12, perim(P) / 10));
+  P = resample(P, E, true);
+  if (polyArea(P) < 0) P.reverse();
+  const vmin = o.vmin ?? .45, vmax = o.vmax ?? 1.6, vf = o.vf ?? .015, ox = r() * 200, oy = r() * 200;
+  const V = P.map(([x, y]) => vmin + (vmax - vmin) * clamp(.5 + VNZ(x * vf + ox, y * vf + oy)));
+  return { P, V };
+}
+function bbOf(list, pad) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const P of list) for (const p of P) {
+    if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+  }
+  x0 = Math.max(0, Math.floor(x0 - pad)); y0 = Math.max(0, Math.floor(y0 - pad));
+  x1 = Math.min(W, Math.ceil(x1 + pad)); y1 = Math.min(H, Math.ceil(y1 + pad));
+  if (x1 - x0 < 2 || y1 - y0 < 2) return null;
+  return { x0, y0, w: x1 - x0, h: y1 - y0 };
+}
+const bbUnion = (a, b) => {
+  if (!a) return b; if (!b) return a;
+  const x0 = Math.min(a.x0, b.x0), y0 = Math.min(a.y0, b.y0);
+  return { x0, y0, w: Math.max(a.x0 + a.w, b.x0 + b.w) - x0, h: Math.max(a.y0 + a.h, b.y0 + b.h) - y0 };
+};
+
+/* Stack the polygons: every layer is a fresh deformation at low alpha.
+   o.pick: one base per layer (a graded wash) instead of all of them. */
+const SCR = cv(W, H), SX = ctxOf(SCR);
+function stack(bases, bb, o = {}) {
+  const r = rngFor('s:' + o.key), L = o.layers ?? 32, a = o.alpha ?? .05, dep = o.depth ?? 3, amt = o.amt ?? .3;
+  SX.save();
+  SX.beginPath(); SX.rect(bb.x0, bb.y0, bb.w, bb.h); SX.clip();
+  SX.clearRect(bb.x0, bb.y0, bb.w, bb.h);
+  SX.fillStyle = `rgba(0,0,0,${a})`;
+  for (let l = 0; l < L; l++) {
+    SX.beginPath();
+    if (o.pick) { const B = bases[l % bases.length]; trace(SX, deform(B.P, B.V, dep, amt, r)[0], true); }
+    else for (const B of bases) trace(SX, deform(B.P, B.V, dep, amt, r)[0], true);
+    SX.fill();
+  }
+  SX.restore();
+  const d = SX.getImageData(bb.x0, bb.y0, bb.w, bb.h).data, n = bb.w * bb.h, out = new Float32Array(n);
+  const inv = 1 / (255 * (1 - Math.pow(1 - a, o.norm ?? (o.pick ? Math.ceil(L / bases.length) : L))));
+  for (let i = 0; i < n; i++) out[i] = d[i * 4 + 3] * inv;
+  return out;
+}
+
+/* Density → finished wash. Order matters: wet blur, crisp cut, texture and
+   masks, then edge darkening (so rims follow masks too), granulation, dry brush. */
+function offs(r, lo, span, total) { const mn = -lo, mx = total - lo - span; return mx > mn ? Math.floor(mn + r() * (mx - mn)) : 0; }
+function finish(d, bb, o) {
+  const w = bb.w, h = bb.h, cnt = w * h, pig = o.pig;
+  if (o.wet) d = blur(d, w, h, o.wet);
+  if (o.cut) { const c0 = o.cut, c1 = o.cut * 2.5; for (let i = 0; i < cnt; i++) { const v = d[i]; d[i] = v * smooth(c0, c1, v); } }
+  const r = rngFor('f:' + o.key), ox = offs(r, bb.x0, w, W), oy = offs(r, bb.y0, h, H);
+  const t1 = o.tex ?? .2, t2 = o.tex2 ?? .12, t3 = o.tex3 ?? .05, fn = o.fn;
+  for (let y = 0; y < h; y++) {
+    const gy = bb.y0 + y, row = gy * W, srow = (gy + oy) * W + ox;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!(d[i] > 0)) { d[i] = 0; continue; }
+      const gx = bb.x0 + x, si = srow + gx;
+      let f = 1 + t1 * NF1[si] + t2 * NF2[si] + t3 * NF3[si];
+      if (fn) f *= fn(gx, gy, row + gx, i);
+      d[i] = f > 0 ? d[i] * f : 0;
+    }
+  }
+  if (o.edge) {
+    const b = blur(d, w, h, o.er ?? 3), e = o.edge;
+    for (let i = 0; i < cnt; i++) { const rim = d[i] - b[i]; if (rim > 0) d[i] += e * rim; }
+  }
+  const Gs = (o.gran ?? 1) * pig.G * .8, dry = o.dry, dfn = o.dryFn, k = o.k ?? .5;
+  for (let y = 0; y < h; y++) {
+    const gy = bb.y0 + y, row = gy * W, srow = (gy + oy) * W + ox;
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x; let v = d[i]; if (v <= 0) continue;
+      const gi = row + bb.x0 + x, hm = HM[gi], hs = HMS[gi], si = srow + bb.x0 + x;
+      // pigment settles in the valleys, patchily (where the wash was wettest)
+      const patch = clamp(.55 + .9 * NF1[si] + .5 * NF2[si], .15, 1.4), gv = hs < .5 ? (.5 - hs) * 1.7 : (.5 - hs) * .6;
+      v *= 1 + Gs * patch * gv;
+      if (dry !== undefined) { const t = dfn ? dfn(bb.x0 + x, gy, v) : dry; v *= smooth(t - .045, t + .045, hm); }
+      d[i] = v > 0 ? v * k : 0;
+    }
+  }
+  if (!o.noPaint) composite(d, bb, pig);
+  return d;
+}
+
+/* Beer-Lambert glaze: the layer holds transmittance exp(-K·d) (white where
+   there is no paint) and is multiplied onto the painting. */
+const LAY = cv(W, H), LX = ctxOf(LAY);
+function composite(d, bb, pig) {
+  const K = pig.K, w = bb.w, h = bb.h, id = LX.createImageData(w, h), p = id.data;
+  const S = 1024, M = 4 * S, lr = new Uint8ClampedArray(M + 1), lg = new Uint8ClampedArray(M + 1), lb = new Uint8ClampedArray(M + 1);
+  for (let i = 0; i <= M; i++) { const v = i / S; lr[i] = 255 * Math.exp(-K[0] * v); lg[i] = 255 * Math.exp(-K[1] * v); lb[i] = 255 * Math.exp(-K[2] * v); }
+  for (let i = 0, j = 0, n = w * h; i < n; i++, j += 4) {
+    const v = d[i], q = v >= 4 ? M : (v * S + .5) | 0;
+    p[j] = lr[q]; p[j + 1] = lg[q]; p[j + 2] = lb[q]; p[j + 3] = 255;
+  }
+  LX.putImageData(id, bb.x0, bb.y0);
+  G2.globalCompositeOperation = 'multiply';
+  G2.drawImage(LAY, bb.x0, bb.y0, w, h, bb.x0, bb.y0, w, h);
+  G2.globalCompositeOperation = 'source-over';
+}
+
+/* One call: polygons → bases → stack → finish. */
+function wash(polys, o) {
+  const bases = o.bases || polys.map((p, i) => base(p, o.key + ':' + i, o));
+  const auto = Math.ceil(2.6 * (o.E ?? 12) * (o.amt ?? .3) * (o.vmax ?? 1.6) + 2 * (o.wet || 0) + 8);
+  const bb = o.bb || bbOf(bases.map(b => b.P), Math.max(o.pad ?? 0, auto));
+  if (!bb) return null;
+  const n = stack(bases, bb, o);
+  return { d: finish(n, bb, o), bb };
+}
+
+/* Lumpy ellipse (never a perfect circle). */
+function blob(cx, cy, rx, ry, key, o = {}) {
+  const r = rngFor('blob:' + key), n = o.n ?? 14, lump = o.lump ?? .12, rot = o.rot ?? 0;
+  const k1 = 2 + Math.floor(r() * 3), k2 = 4 + Math.floor(r() * 3), p1 = r() * TAU, p2 = r() * TAU, c = Math.cos(rot), s = Math.sin(rot);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / n * TAU, m = 1 + lump * (Math.sin(k1 * t + p1) * .6 + Math.sin(k2 * t + p2) * .4) + (r() - .5) * lump * .6;
+    const px = Math.cos(t) * rx * m, py = Math.sin(t) * ry * m;
+    out.push([cx + px * c - py * s, cy + px * s + py * c]);
+  }
+  return out;
+}
+/* Crescent on an ellipse: outer arc t1→t2, inner edge pulled in by T·sin(). */
+function crescent(cx, cy, rx, ry, t1, t2, T, key, o = {}) {
+  const r = rngFor('cres:' + key), n = o.n ?? 16, lk = o.lk ?? 5, la = o.la ?? .18, ph = r() * TAU, out = [];
+  const rad = o.rad || (() => 1);
+  for (let i = 0; i <= n; i++) { const t = t1 + (t2 - t1) * i / n, m = rad(t); out.push([cx + Math.cos(t) * rx * m, cy + Math.sin(t) * ry * m]); }
+  for (let i = n - 1; i > 0; i--) {
+    const u = i / n, t = t1 + (t2 - t1) * u, m = rad(t);
+    const th = T * Math.pow(Math.sin(Math.PI * u), o.pw ?? .7) * (1 + la * Math.sin(lk * t + ph));
+    out.push([cx + Math.cos(t) * rx * m * (1 - th), cy + Math.sin(t) * ry * m * (1 - th)]);
+  }
+  return out;
+}
+
+/* Lift pigment back toward the paper (a damp brush or tissue). */
+function lift(mask, bb, amount) {
+  const img = G2.getImageData(bb.x0, bb.y0, bb.w, bb.h), p = img.data;
+  for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+    const i = y * bb.w + x, m = mask[i]; if (m <= 0) continue;
+    const gi = (bb.y0 + y) * W + bb.x0 + x, a = Math.min(.95, m * amount * (.72 + .28 * HM[gi])), j = i * 4;
+    p[j] += (PAPER[0] - p[j]) * a; p[j + 1] += (PAPER[1] - p[j + 1]) * a; p[j + 2] += (PAPER[2] - p[j + 2]) * a;
+  }
+  G2.putImageData(img, bb.x0, bb.y0);
+}
+
+/* Rasterise polygons to a coverage array in bb (solid, anti-aliased). */
+function coverage(polys, bb, ctx = SX) {
+  ctx.save(); ctx.beginPath(); ctx.rect(bb.x0, bb.y0, bb.w, bb.h); ctx.clip();
+  ctx.clearRect(bb.x0, bb.y0, bb.w, bb.h);
+  ctx.fillStyle = '#000'; ctx.beginPath();
+  for (const P of polys) trace(ctx, P, true);
+  ctx.fill(); ctx.restore();
+  const d = ctx.getImageData(bb.x0, bb.y0, bb.w, bb.h).data, out = new Float32Array(bb.w * bb.h);
+  for (let i = 0; i < out.length; i++) out[i] = d[i * 4 + 3] / 255;
+  return out;
+}
+
+let HM, HMS, NF1, NF2, NF3;
+
+/* ══ SCENE GEOMETRY ═══════════════════════════════════════════════════════
+   Ground plane = canopy top. Camera 120 m above it, level, looking west.
+   Screen x = CX + FL·X/Z, y = HZ + FL·(CAM − h)/Z. */
+const proj = (X, Z, h = 0) => [CX + FL * X / Z, HZ + FL * (CAM - h) / Z];
+const zOpen = y => FL * (CAM + WDROP) / (y - HZ);     // depth of the water plane on row y
+
+/* The tributary: a sine-generated meander (Langbein & Leopold), θ(s) = θ0 + θm·sin(2πs/λ),
+   with slowly wandering λ and θm so no two bends are alike. Units: metres. */
+const RW = 44;
+const RIV = (() => {
+  const n1 = gnoise('rv1'), n2 = gnoise('rv2'), n3 = gnoise('rv3'), pts = [];
+  let X = 230, Z = 300, s = 0, ph = 3.5;
+  const ds = 4;
+  while (Z < 34000 && s < 95000) {
+    const lam = 520 * (1 + .24 * n1(s / 2600, .3)), thm = .92 * (1 + .18 * n2(s / 1900, .7)), head = -.26 + .08 * n3(s / 7000, .1);
+    const th = head + thm * Math.sin(ph), kap = thm * Math.cos(ph) * TAU / lam;
+    const hw = RW / 2 * (1 + .1 * n1(s / 900, 5.5));
+    // point bars on the inside of bends, in the dry season
+    const bar = Z < 2600 ? 17 * Math.pow(Math.max(0, Math.abs(Math.cos(ph)) - .82) / .18, 1.2) * (.6 + .4 * n2(s / 700, 3.3)) : 0;
+    pts.push({ X, Z, s, th, hw, kap, bar, side: Math.sign(kap) });
+    X += Math.sin(th) * ds; Z += Math.cos(th) * ds; s += ds; ph += TAU * ds / lam;
+  }
+  return pts;
+})();
+
+/* Oxbow lakes: abandoned loops beside the channel. */
+function oxbow(Xc, Zc, R, a0, a1, w, key) {
+  const r = rngFor('ox:' + key), n = gnoise('ox' + key), pts = [];
+  for (let i = 0; i <= 90; i++) {
+    const u = i / 90, a = a0 + (a1 - a0) * u, rr = R * (1 + .1 * n(u * 3, .5));
+    pts.push({ X: Xc + Math.cos(a) * rr, Z: Zc + Math.sin(a) * rr * .85, th: 0, hw: w / 2 * Math.pow(Math.sin(Math.PI * u), .45) * (.8 + .2 * r()), bar: 0 });
+  }
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    pts[i].th = Math.atan2(b.X - a.X, b.Z - a.Z);
+  }
+  return pts;
+}
+const OXB = [oxbow(230, 1190, 100, -1.5, 1.2, 30, 'a'), oxbow(-470, 2440, 85, 1.6, 4.6, 26, 'b')];
+
+/* Spatial index of open water / sand for keeping trees off it. */
+const OPENB = new Map();
+function addOpen(p) { const b = Math.floor(p.Z / 30); if (!OPENB.has(b)) OPENB.set(b, []); OPENB.get(b).push(p); }
+for (const p of RIV) if (p.Z < 9000) addOpen(p);
+for (const o of OXB) for (const p of o) addOpen(p);
+function openDist(X, Z) {
+  let best = 1e9;
+  const b0 = Math.floor((Z - 100) / 30), b1 = Math.floor((Z + 100) / 30);
+  for (let b = b0; b <= b1; b++) {
+    const arr = OPENB.get(b); if (!arr) continue;
+    for (const p of arr) {
+      const dx = X - p.X, dz = Z - p.Z, d = Math.sqrt(dx * dx + dz * dz);
+      // the bar only widens the inner bank
+      const nx = Math.cos(p.th), nz = -Math.sin(p.th), side = dx * nx + dz * nz;
+      const reach = p.hw + (p.bar && Math.sign(side) === -p.side ? p.bar : 0) + 3;
+      if (d - reach < best) best = d - reach;
+    }
+  }
+  return best;
+}
+
+/* Banks as screen polygons (quads), adaptively sampled. */
+function strip(pts, wFn, h, zmax = 1e9) {
+  const quads = []; let prev = null, lastY = 1e9, lastX = 1e9;
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i]; if (p.Z > zmax) break;
+    const [w1, w2] = wFn(p), nx = Math.cos(p.th), nz = -Math.sin(p.th);
+    const L = proj(p.X + nx * w1, p.Z + nz * w1, h), R = proj(p.X - nx * w2, p.Z - nz * w2, h);
+    const c = [(L[0] + R[0]) / 2, (L[1] + R[1]) / 2];
+    if (prev && i < pts.length - 1 && Math.hypot(c[0] - lastX, c[1] - lastY) < 1.6) continue;
+    if (prev) quads.push([prev[0], prev[1], R, L]);
+    prev = [L, R]; lastX = c[0]; lastY = c[1];
+  }
+  return quads;
+}
+const WATER_Q = strip(RIV, p => [p.hw, p.hw], -WDROP).concat(...OXB.map(o => strip(o, p => [p.hw, p.hw], -WDROP)));
+// sand: from the inner water's edge inward by the bar width
+const SAND_Q = strip(RIV, p => p.side > 0 ? [-p.hw + 1, p.hw + p.bar] : [p.hw + p.bar, -p.hw + 1], -WDROP + 1.5, 3300)
+  .filter(q => Math.hypot(q[3][0] - q[2][0], q[3][1] - q[2][1]) > 1.2);
+
+/* Canopy trees, jittered hexagonal grid on the ground plane (near zone). */
+const TREES = (() => {
+  const r = rngFor('trees'), cn = gnoise('treecol'), out = [];
+  let Z = 176, row = 0;
+  while (Z < 960) {
+    const half = 1160 * Z / FL, sp = 24;
+    let X = -half + (row % 2 ? sp * .5 : 0) + (r() - .5) * sp;
+    while (X < half) {
+      const emer = r() < .06, D = clamp(24 * Math.exp(gauss(r) * .3), 13, 40) * (emer ? 1.45 : 1);
+      const Xt = X + (r() - .5) * 9, Zt = Z + (r() - .5) * 12;
+      if (openDist(Xt, Zt) > D * .04)
+        out.push({ X: Xt, Z: Zt, D, ht: emer ? 8 + r() * 6 : (r() - .5) * 5, emer, id: out.length, c: cn(Xt / 170, Zt / 170) * 1.6 + (r() - .5) });
+      X += sp * (.82 + r() * .36);
+    }
+    Z += 18.5 * (.9 + r() * .2); row++;
+  }
+  return out.sort((a, b) => a.Z - b.Z);
+})();
+/* Farther rows: crowns merge into clumps with distance (a painter's economy),
+   but still shrink on screen: D ∝ Z^0.45 → screen size ∝ Z^-0.55. */
+const SLICES = (() => {
+  const r = rngFor('rows'), out = [];
+  let Z = 960;
+  while (Z < 7200) {
+    const Deff = 25 * Math.pow(Z / 960, .45), half = 1110 * Z / FL, sp = Deff * .9, items = [];
+    let X = -half + r() * sp;
+    while (X < half) {
+      const Zt = Z * (1 + (r() - .5) * .03), D = Deff * (.75 + r() * .5);
+      if (openDist(X, Zt) > D * .08) items.push({ X, Z: Zt, D, ht: (r() - .5) * 4, c: (r() - .5) });
+      X += sp * (.8 + r() * .4);
+    }
+    out.push({ Z, items });
+    Z *= 1.034;
+  }
+  return out;
+})();
+function crownGeo(t) {
+  const [sx, top] = proj(t.X, t.Z, t.ht);
+  const R = FL * t.D / (2 * t.Z), th = Math.atan2(CAM - t.ht, t.Z), ratio = Math.sin(th) + .45 * Math.cos(th);
+  return { cx: sx, cy: top + R * ratio * .92, rx: R, ry: R * ratio };
+}
+
+/* ── clouds: big masses [x, y, r], back (top) to front (bottom); each mass gets
+   smaller cauliflower bumps along its upper arc when the cloud is built. ── */
+function cumulus(cx, baseY, w, h, key) {
+  const r = rngFor('cu:' + key), M = [], n = Math.max(1, Math.round(w / (h * 1.5)));
+  for (let i = 0; i < n; i++) {
+    const u = n > 1 ? i / (n - 1) : .5, x = cx - w * .22 + u * w * .44 + (r() - .5) * w * .08;
+    const rr = h * (.42 + r() * .16) * (1 - .35 * Math.abs(2 * u - 1));
+    M.push([x, baseY - h + rr * 1.05 + (r() - .5) * h * .1, rr]);
+  }
+  M.sort((a, b) => (a[1] - a[2]) - (b[1] - b[2]));
+  M.push([cx + (r() - .5) * w * .06, baseY - h * .3, w * .47, h * .5 / (w * .47)]);   // the flat body in front
+  return M;
+}
+const TOWER = [
+  [1094, 104, 46], [1040, 128, 44], [1152, 132, 40],
+  [1072, 192, 74], [1172, 208, 56], [982, 222, 54],
+  [1122, 274, 84], [994, 292, 78], [1238, 316, 56],
+  [1066, 402, 244, .42],
+];
+const CLOUDS = [
+  { key: 'tower', base: 447, mass: TOWER, lost: 62, sh: 1, bump: 1 },
+  { key: 'left', base: 454, mass: cumulus(440, 454, 236, 112, 'left'), lost: 34, sh: .85, bump: 1 },
+  { key: 'right', base: 460, mass: cumulus(1762, 460, 250, 94, 'right'), lost: 30, sh: .8, bump: 1 },
+  { key: 'h1', base: 470, mass: cumulus(130, 470, 118, 34, 'h1'), lost: 13, sh: .65, bump: .8 },
+  { key: 'h2', base: 468, mass: cumulus(642, 468, 92, 29, 'h2'), lost: 12, sh: .65, bump: .8 },
+  { key: 'h3', base: 473, mass: cumulus(1508, 473, 78, 23, 'h3'), lost: 10, sh: .6, bump: .7 },
+  { key: 'h4', base: 474, mass: cumulus(1882, 474, 86, 21, 'h4'), lost: 10, sh: .6, bump: .7 },
+  { key: 'h5', base: 476, mass: cumulus(758, 476, 50, 15, 'h5'), lost: 8, sh: .55, bump: .6 },
+  { key: 'h6', base: 477, mass: cumulus(1442, 477, 48, 13, 'h6'), lost: 8, sh: .55, bump: .6 },
+];
+
+/* ── the flying river: centreline and width (perspective: w ∝ distance above HZ) ── */
+const RIBBON = {
+  pts: [[2140, -150], [1900, 20], [1700, 150], [1540, 262], [1400, 342], [1250, 396], [1060, 430], [850, 452], [620, 465], [380, 473], [140, 478], [-160, 483]],
+  w: [520, 420, 320, 240, 170, 118, 82, 58, 42, 32, 24, 18],
+};
+
+/* ── Andes: a fractal skyline (midpoint displacement) over three massifs ─── */
+const ANDES = (() => {
+  const r = rngFor('andes'), n1 = gnoise('and1'), n2 = gnoise('and2'), K = 1024, f = new Float32Array(K + 1);
+  let step = K, amp = 26;
+  f[0] = 0; f[K] = 0;
+  while (step > 1) {
+    for (let i = step / 2; i < K; i += step) f[i] = (f[i - step / 2] + f[i + step / 2]) / 2 + gauss(r) * amp;
+    step /= 2; amp *= .56;
+  }
+  const gs = (x, c, w) => Math.exp(-Math.pow((x - c) / w, 2));
+  const massif = x => Math.max(24 * gs(x, 92, 34), 38 * gs(x, 158, 22), 27 * gs(x, 197, 17), 31 * gs(x, 266, 30), 17 * gs(x, 336, 40),
+    19 * gs(x, 418, 30), 28 * gs(x, 460, 19), 21 * gs(x, 516, 34), 12 * gs(x, 594, 40), 13 * gs(x, 770, 40), 19 * gs(x, 808, 20), 13 * gs(x, 862, 30))
+    + 8 * gs(x, 330, 330);
+  const ridge = [], foot = [];
+  for (let x = -20; x <= 1340; x += 2) {
+    const u = (x + 20) / 1360 * K, i = Math.min(K - 1, u | 0), fr = f[i] + (f[i + 1] - f[i]) * (u - i);
+    const h = Math.max(4, (9 + massif(x) + fr * (.45 + .02 * massif(x))) * smooth(1340, 960, x));
+    ridge.push([x, HOR - 4 - h]);
+    foot.push([x, HOR - 3 - (12 + 6 * n2(x / 60, 1.3)) * smooth(1340, 900, x) * (.6 + .4 * (.5 + .5 * n1(x / 31, 9)))]);
+  }
+  return { ridge, foot };
+})();
+/* ══ PAINTING ═════════════════════════════════════════════════════════════ */
+const T = {};                       // stage timings (ms), read by the probe
+let CR, BLOOM, BRIM, RIB, SNOWM;                 // cloud reserve, sky blooms, flying-river body (full frame)
+const CL = [];                      // per-cloud rasters
+const LS = [.55, -.83];             // sun direction on screen (up and to the right; sun behind the viewer)
+
+/* Radius varies with angle (a small table), so no bulge is ever a circle. */
+function bulgeTable(key) {
+  const n = gnoise('bt:' + key), r = rngFor('bt:' + key), tab = new Float32Array(65), k = 5 + Math.floor(r() * 4), ph = r() * TAU;
+  for (let i = 0; i <= 64; i++) {
+    const a = i / 64 * TAU;
+    tab[i] = 1 + .07 * n(Math.cos(a) * 1.3 + 5, Math.sin(a) * 1.3 + 5) + .03 * Math.sin(k * a + ph);
+  }
+  tab[64] = tab[0];
+  return tab;
+}
+const radAt = (tab, a) => { let u = (a / TAU) % 1; if (u < 0) u += 1; const f = u * 64, i = f | 0; return tab[i] + (tab[i + 1] - tab[i]) * (f - i); };
+function massesOf(c) {
+  const r = rngFor('ms:' + c.key);
+  return c.mass.map(([x, y, rr, sy = 1], i) => {
+    const circ = [{ x, y, r: rr, sy, tab: bulgeTable(c.key + 'm' + i) }], nb = Math.max(2, Math.round(rr / 14 * c.bump));
+    for (let k = 0; k < nb; k++) {
+      const a = -Math.PI * (.1 + .8 * (k + .5) / nb) + (r() - .5) * .3, br = rr * (.16 + r() * .16) * Math.sqrt(sy), d = (.8 + r() * .1);
+      circ.push({ x: x + Math.cos(a) * rr * d, y: y + Math.sin(a) * rr * sy * d, r: br, sy: 1, tab: bulgeTable(c.key + 'b' + i + '_' + k) });
+    }
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const q of circ) { x0 = Math.min(x0, q.x - q.r * 1.12); x1 = Math.max(x1, q.x + q.r * 1.12); y0 = Math.min(y0, q.y - q.r * q.sy * 1.12); y1 = Math.max(y1, q.y + q.r * q.sy * 1.12); }
+    return { x, y, r: rr, sy, circ, x0, y0, x1, y1 };
+  });
+}
+function insideMass(M, px, py) {
+  if (px < M.x0 || px > M.x1 || py < M.y0 || py > M.y1) return 0;
+  let m = 0;
+  for (const q of M.circ) {
+    const dx = px - q.x, dy = (py - q.y) / q.sy, d2 = dx * dx + dy * dy, R = q.r * 1.12;
+    if (d2 > R * R) continue;
+    const sd = q.r * radAt(q.tab, Math.atan2(dy, dx)) - Math.sqrt(d2), v = sd >= .8 ? 1 : sd <= -.8 ? 0 : smooth(-.8, .8, sd);
+    if (v > m) { m = v; if (m >= 1) return 1; }
+  }
+  return m;
+}
+
+/* One front-to-back pass per cloud: silhouette, and a local shading field in
+   which every mass is shaded on its lower-left and cut crisply by the masses
+   in front of it (the bright cauliflower edge against the shade behind). */
+const TN = gnoise('term');
+function buildClouds() {
+  CR = new Float32Array(N);
+  for (const c of CLOUDS) {
+    const M = massesOf(c);
+    let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+    for (const m of M) { x0 = Math.min(x0, m.x0); x1 = Math.max(x1, m.x1); y0 = Math.min(y0, m.y0); y1 = Math.max(y1, m.y1); }
+    const top = y0 + 8, H0 = c.base - top, cx = (x0 + x1) / 2, hw = (x1 - x0) / 2, rr = rngFor('t0:' + c.key);
+    for (const m of M) {
+      const ty = clamp((m.y - top) / H0), left = clamp((cx - m.x) / hw, -1, 1);
+      m.tr = clamp(1.12 - .42 * ty - .2 * left + (rr() - .5) * .22, .5, 1.45);
+      m.sa = .04 + rr() * .08; m.sb = .06 + rr() * .3;
+      m.dark = .6 + .3 * ty + .15 * Math.max(0, left);
+    }
+    const bb = { x0: Math.max(0, Math.floor(x0 - 20)), y0: Math.max(0, Math.floor(y0 - 20)) };
+    bb.w = Math.min(W, Math.ceil(x1 + 20)) - bb.x0; bb.h = Math.min(H, Math.ceil(Math.max(y1, c.base + c.lost) + 20)) - bb.y0;
+    const w = bb.w, h = bb.h, sil = new Float32Array(w * h), shade = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const px = bb.x0 + x, py = bb.y0 + y; let rem = 1, sh = 0;
+      for (let k = M.length - 1; k >= 0 && rem > .002; k--) {
+        const m = M[k], a = insideMass(m, px, py); if (a <= 0) continue;
+        const qx = (px - m.x) / m.r - .42 * LS[0], qy = (py - m.y) / (m.r * m.sy) - .42 * LS[1];
+        const u = Math.sqrt(qx * qx + qy * qy) + .1 * TN(px / 24, py / 24) + .05 * TN(px / 7, py / 7 + 40);
+        sh += rem * a * smooth(m.tr - m.sa, m.tr + m.sb, u) * m.dark;
+        rem *= 1 - a;
+      }
+      sil[y * w + x] = 1 - rem; shade[y * w + x] = sh;
+    }
+    // crisp top, softer sides, a lost bottom dissolving into the haze
+    const soft = blur(sil, w, h, 8), rv = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const py = bb.y0 + y, t = smooth(c.base - c.lost * 1.7, c.base, py), cutB = 1 - smooth(c.base - c.lost * .35, c.base + c.lost * .45, py);
+      for (let x = 0; x < w; x++) { const i = y * w + x; rv[i] = lerp(sil[i], Math.min(sil[i], soft[i] * 1.04), t) * cutB; }
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const gi = (bb.y0 + y) * W + bb.x0 + x; CR[gi] = Math.max(CR[gi], rv[y * w + x]); }
+    CL.push({ c, M, bb, sil, rv, shade, top, H0, cx, hw });
+  }
+}
+
+/* Blooms (backruns): water crept back into a drying wash, leaving a slightly
+   paler cauliflower; its dark rim comes from the wash's edge darkening. */
+function buildBlooms() {
+  BLOOM = new Float32Array(N);
+  const spots = [[965, 402, 52, 'b1'], [1712, 128, 62, 'b3']];
+  for (const [x, y, rr, key] of spots) {
+    const P = blob(x, y, rr, rr * .7, key, { n: 26, lump: .16 });
+    const bs = base(P, 'bloom' + key, { E: 6, bdepth: 3, bamt: .3, vmin: .7, vmax: 1.8 });
+    const bb = bbOf([bs.P], 60), m = stack([bs], bb, { key: 'bl' + key, layers: 5, alpha: .3, depth: 3, amt: .3 });
+    for (let yy = 0; yy < bb.h; yy++) for (let xx = 0; xx < bb.w; xx++) {
+      const v = smooth(.3, .5, m[yy * bb.w + xx]), gi = (bb.y0 + yy) * W + bb.x0 + xx;
+      BLOOM[gi] = Math.max(BLOOM[gi], v);
+    }
+  }
+  const core = blur(BLOOM, W, H, 7, 2);
+  for (let i = 0; i < N; i++) BLOOM[i] = BLOOM[i] * (.35 + .65 * Math.min(1, core[i] * 1.3));
+  // the cauliflower rim: pigment pushed just outside the bloom
+  const bl = blur(BLOOM, W, H, 4, 1);
+  BRIM = new Float32Array(N);
+  for (let i = 0; i < N; i++) { const v = bl[i] - BLOOM[i]; if (v > 0) BRIM[i] = Math.min(1, v * 2.4 * clamp(.5 + 2.2 * NF2[i]) * clamp(.8 + 1.2 * NF3[i])); }
+}
+
+function gradedBases(n, key, fn) {
+  const r = rngFor('gb:' + key), out = [];
+  for (let l = 0; l < n; l++) out.push(base(fn(l, r), key + l, { E: 44, bdepth: 2, bamt: .16, vmin: .5, vmax: 1.6, vf: .004 }));
+  return out;
+}
+
+/* ── the flying river ─────────────────────────────────────────────────────
+   Centreline, width (∝ height above the vanishing line), a gentle twist, and
+   the body as one Hobbs stack kept for three uses: the sky is painted around
+   it (so it reads paler, like lit vapour), a violet-grey glaze, and streaks. */
+function ribbonLine() {
+  const per = 18, c = curve(RIBBON.pts, false, per), out = [];
+  for (let i = 0; i < c.length; i++) {
+    const seg = Math.min(RIBBON.w.length - 2, Math.floor(i / per)), u = i / per - seg;
+    out.push({ x: c[i][0], y: c[i][1], w: lerp(RIBBON.w[seg], RIBBON.w[seg + 1], u) });
+  }
+  const L = [out[0]];
+  for (const p of out) { const q = L[L.length - 1]; if (Math.hypot(p.x - q.x, p.y - q.y) >= 5) L.push(p); }
+  const n = L.length, br = gnoise('breath');
+  for (let i = 0; i < n; i++) {
+    const a = L[Math.max(0, i - 1)], b = L[Math.min(n - 1, i + 1)], d = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const p = L[i]; p.nx = -(b.y - a.y) / d; p.ny = (b.x - a.x) / d; p.u = i / (n - 1);
+    p.tw = 1;
+    p.w *= 1 + .16 * br(p.u * 6, .5);
+  }
+  return L;
+}
+function buildRibbon() {
+  const L = ribbonLine(), n = L.length;
+  const body = taper(L.map(p => [p.x, p.y]), s => L[Math.min(n - 1, Math.round(s * (n - 1)))].w * .5 * smooth(0, .02, s));
+  const bs = base(body, 'rib', { E: 14, bdepth: 1, bamt: .15, vmin: .45, vmax: 2.4, vf: .012 });
+  const bb = bbOf([bs.P], 40), m = stack([bs], bb, { key: 'rib-body', layers: 38, alpha: .045, depth: 3, amt: .34 });
+  // which parts run behind which clouds
+  const YC = new Float32Array(W).fill(1e4);
+  for (const p of L) { const x = Math.round(p.x); if (x >= 0 && x < W) YC[x] = p.y; }
+  for (let x = 1; x < W; x++) if (YC[x] > 9e3) YC[x] = YC[x - 1];
+  const behind = new Float32Array(N);
+  for (const K of CL) for (let y = 0; y < K.bb.h; y++) for (let x = 0; x < K.bb.w; x++) {
+    const gx = K.bb.x0 + x, v = K.rv[y * K.bb.w + x]; if (v <= 0) continue;
+    const f = K.c.key === 'tower' ? smooth(398, 418, YC[gx]) : 1, gi = (K.bb.y0 + y) * W + gx;
+    behind[gi] = Math.max(behind[gi], v * f);
+  }
+  const full = new Float32Array(N);
+  for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) { const gi = (bb.y0 + y) * W + bb.x0 + x; full[gi] = Math.min(1.2, m[y * bb.w + x]); }
+  RIB = { L, bb, m, full, behind };
+}
+
+function paintSky() {
+  const bb = { x0: 0, y0: 0, w: W, h: HOR + 26 };
+  const skyMask = (gx, gy, gi) => (1 - CR[gi]) * (1 - .97 * SNOWM[gi]) * (1 - .2 * BLOOM[gi]) * (1 + .9 * BRIM[gi]) * (1 - .5 * Math.min(1, RIB.full[gi]) * (1 - RIB.behind[gi]));
+  const n = 40, cer = gradedBases(n, 'cer', (l, r) => {
+    const yb = 40 + 490 * Math.pow((l + .5) / n, 1.12), pts = [[-120, -120], [2040, -120], [2040, yb + gauss(r) * 12]];
+    for (let x = 2040; x >= -120; x -= 150) pts.push([x, yb + 16 * Math.sin(x / 270 + l * 1.7) + gauss(r) * 7]);
+    return pts;
+  });
+  wash(null, { bases: cer, bb, key: 'sky-cer', pick: true, layers: n, norm: n, alpha: .05, depth: 3, amt: .28,
+    wet: 14, tex: .16, tex2: .09, tex3: .03, fn: skyMask, edge: 1.6, er: 3, gran: .8, k: .78, pig: mix({ cer: 1 }) });
+  const nu = 26, ult = gradedBases(nu, 'ult', (l, r) => {
+    const yb = -30 + 330 * Math.pow((l + .5) / nu, 1.3), pts = [[-120, -120], [1500 - l * 20, -120]];
+    for (let x = 1500 - l * 20; x >= -120; x -= 140) pts.push([x, yb * (1 - x / 2400) + gauss(r) * 9]);
+    return pts;
+  });
+  wash(null, { bases: ult, bb, key: 'sky-ult', pick: true, layers: nu, norm: nu, alpha: .06, depth: 3, amt: .3,
+    wet: 26, tex: .22, tex2: .1, fn: skyMask, edge: .8, er: 4, gran: 1, k: .3, pig: mix({ ult: .8, vio: .2 }) });
+  const nw = 24, warm = gradedBases(nw, 'warm', (l, r) => {
+    const yt = 238 + 250 * Math.pow((l + .5) / nw, .9), pts = [];
+    for (let x = -120; x <= 2040; x += 150) pts.push([x, yt + 12 * Math.sin(x / 330 + l) + gauss(r) * 6]);
+    pts.push([2040, HOR + 30], [-120, HOR + 30]);
+    return pts;
+  });
+  wash(null, { bases: warm, bb, key: 'sky-warm', pick: true, layers: nw, norm: nw, alpha: .06, depth: 3, amt: .3,
+    wet: 30, tex: .25, tex2: .1, fn: (gx, gy, gi) => (1 - .85 * CR[gi]) * (1 - .9 * SNOWM[gi]), gran: .6, k: .2, pig: mix({ och: .62, rose: .38 }) });
+}
+
+const SNOWN = gnoise('snow');
+const ridgeY = x => { const R = ANDES.ridge, i = clamp(Math.round((x + 20) / 2), 0, R.length - 1); return R[i][1]; };
+function snowAt(gx, gy) {
+  const ry = ridgeY(gx), ht = HOR - 4 - ry;
+  if (ht < 31 || gy < ry - 1.5) return 0;
+  const depth = (ht - 31) * .5 + 1.5 * SNOWN(gx / 8, 3.1) + 4 * Math.max(0, SNOWN(gx / 4, 7.7)) * smooth(33, 42, ht);   // gullies
+  return (1 - smooth(depth - 1, depth + 1, gy - ry)) * smooth(ry - 1.5, ry + .5, gy);
+}
+function buildSnow() {
+  SNOWM = new Float32Array(N);
+  for (let y = HOR - 110; y < HOR; y++) for (let x = 0; x < 1340; x++) SNOWM[y * W + x] = snowAt(x, y);
+  SNOWM = blur(SNOWM, W, H, 1, 1);
+}
+function paintAndes() {
+  const { ridge, foot } = ANDES;
+  const rx = ridgeY, snow = snowAt;
+  const range = ridge.concat([[1360, HOR + 6], [-40, HOR + 6]]);
+  const rbb = { x0: 0, y0: HOR - 90, w: 1360, h: 100 }, rcov = coverage([range], rbb);
+  const inR = (gx, gy) => { const y = gy - rbb.y0; return y < 0 || y >= rbb.h || gx >= rbb.w ? 0 : rcov[y * rbb.w + gx]; };
+  const aerial = (gx, gy) => (1 - snow(gx, gy)) * (.45 + .55 * smooth(HOR + 2, HOR - 44, gy)) * (1 - smooth(900, 1340, gx));
+  // the sky just above the snowcaps is darkened a touch, so the snow reads white
+  const cap = ridge.filter(p => HOR - 4 - p[1] > 31);
+  if (cap.length) {
+    const halo = cap.map(p => blob(p[0], p[1] - 3, 5, 4, 'halo' + p[0], { n: 6, lump: .2 }));
+    wash(halo, { key: 'andes-sky', E: 3, vmin: .6, vmax: 1.5, layers: 14, alpha: .08, depth: 2, amt: .3, wet: 4, tex: .2,
+      fn: (gx, gy, gi) => (1 - inR(gx, gy)) * (1 - CR[gi]), gran: .6, k: .16, pig: mix({ cer: .45, ult: .35, vio: .2 }) });
+  }
+  wash([range], { key: 'andes', E: 4, vmin: .3, vmax: 1, layers: 24, alpha: .065, depth: 3, amt: .2, cut: .1,
+    tex: .2, tex2: .12, fn: aerial, edge: 1.3, er: 2, gran: 1.1, k: .32, pig: mix({ ult: .55, vio: .3, rose: .15 }) });
+  // left-facing slopes in shade (sun behind us, to the right): spurs run down from the ridge
+  const sl = new Float32Array(ridge.length), fnz = gnoise('facet');
+  for (let i = 0; i < ridge.length; i++) { const a = ridge[Math.max(0, i - 2)], b = ridge[Math.min(ridge.length - 1, i + 2)]; sl[i] = (b[1] - a[1]) / (b[0] - a[0]); }
+  const slopeAt = x => sl[clamp(Math.round((x + 20) / 2), 0, sl.length - 1)];
+  const facet = (gx, gy) => {
+    const ry = rx(gx), u = clamp((gy - ry) / Math.max(4, HOR - ry)), s = slopeAt(gx - u * 9) + .35 * fnz(gx / 9, gy / 5);
+    return smooth(.02, .4, -s) * Math.pow(1 - u, .55);
+  };
+  wash([range], { key: 'andes-sh', E: 4, vmin: .3, vmax: 1, layers: 18, alpha: .08, depth: 3, amt: .2, cut: .1, tex: .25,
+    fn: (gx, gy) => facet(gx, gy) * (1 - .55 * snow(gx, gy)) * (1 - smooth(900, 1300, gx)), edge: 1.2, er: 2, gran: 1.1, k: .3,
+    pig: mix({ ult: .6, vio: .25, pay: .15 }) });
+  const fh = foot.concat([[1360, HOR + 6], [-40, HOR + 6]]);
+  wash([fh], { key: 'foothills', E: 5, vmin: .4, vmax: 1.3, layers: 22, alpha: .06, depth: 3, amt: .25, cut: .1, tex: .25, tex2: .15,
+    fn: (gx, gy) => 1 - smooth(1000, 1340, gx), edge: 1, er: 2, gran: 1, k: .18, pig: mix({ ult: .38, hook: .27, vio: .2, cer: .15 }) });
+}
+
+function paintClouds() {
+  for (const K of CL) {
+    const { c, M, bb, rv, shade, top, H0, cx, hw } = K, w = bb.w;
+    const inBB = (gx, gy) => (gy - bb.y0) * w + (gx - bb.x0);
+    // 1 · soft volume, wet-in-wet: heavier low down and on the shaded left
+    const lowPolys = M.filter(m => m.y > top + H0 * .5).map((m, i) => blob(m.x - m.r * .15, m.y + m.r * .2, m.r * .95, m.r * .85, c.key + 'lo' + i, { n: 12, lump: .12 }));
+    lowPolys.push(blob(cx - hw * .5, top + H0 * .6, hw * .45, H0 * .42, c.key + 'left', { n: 14, lump: .15 }));
+    wash(lowPolys, { key: c.key + '-body', bb, E: 14, vmin: .6, vmax: 2, layers: 26, alpha: .05, depth: 3, amt: .35, wet: 12,
+      tex: .28, tex2: .14, fn: (gx, gy, gi) => rv[inBB(gx, gy)] * (.3 + .7 * smooth(top + H0 * .3, c.base, gy)) * (1 - .22 * BLOOM[gi]) * (1 + 1.2 * BRIM[gi]), gran: 1, k: .2 * c.sh,
+      pig: mix({ ult: .5, vio: .22, rose: .12, sie: .16 }) });
+    // 2 · shade of each mass, cut by the bright edges of the masses in front
+    const d = Float32Array.from(shade);
+    finish(d, bb, { key: c.key + '-shade', tex: .3, tex2: .16, tex3: .06, fn: (gx, gy, gi, i) => rv[i] > 0 ? Math.min(1, rv[i] * 1.2) * (1 - .22 * BLOOM[gi]) * (1 + 1.2 * BRIM[gi]) : 0,
+      edge: 1.25, er: 2, gran: 1.1, k: .32 * c.sh, pig: mix({ ult: .5, vio: .2, sie: .2, rose: .1 }) });
+    // 3 · the flat base, darker, lost at the bottom
+    const bw = hw * .98, basePoly = [[cx - bw, c.base - c.lost * .95], [cx + bw * .95, c.base - c.lost * .8], [cx + bw * .9, c.base + 6], [cx - bw * .95, c.base + 6]];
+    wash([basePoly], { key: c.key + '-base', bb, E: 10, vmin: .5, vmax: 1.8, layers: 20, alpha: .06, depth: 3, amt: .3, wet: 6,
+      tex: .28, fn: (gx, gy) => rv[inBB(gx, gy)] * smooth(c.base - c.lost * .95, c.base - c.lost * .25, gy), gran: 1, k: .24 * c.sh,
+      pig: mix({ ult: .5, pay: .2, vio: .2, sie: .1 }) });
+  }
+}
+
+function paintRibbon() {
+  const { L, bb, m, behind } = RIB, n = L.length, occ = gi => 1 - .96 * behind[gi];
+  // violet-grey glaze on the body
+  const farBoost = (gx, gy) => 1 + 1.1 * smooth(410, 475, gy) * smooth(1350, 900, gx);
+  finish(Float32Array.from(m), bb, { key: 'rib-glaze', wet: 4, tex: .32, tex2: .16, fn: (gx, gy, gi) => occ(gi) * farBoost(gx, gy), edge: 1, er: 3,
+    gran: 1, k: .15, pig: mix({ ult: .5, vio: .38, rose: .12 }) });
+  // soft flow lines: the vapour is sheared into long streaks along the jet
+  const r = rngFor('streaks'), polys = [], dry = [];
+  for (let k = 0; k < 11; k++) {
+    const o = (r() * 2 - 1) * .75, s0 = r() * .6, len = .12 + r() * .4, bw = .012 + r() * .045, ph = r() * TAU, pts = [];
+    for (let i = Math.floor(s0 * (n - 1)); i <= Math.min(n - 1, Math.floor((s0 + len) * (n - 1))); i++) {
+      const p = L[i], u = (i / (n - 1) - s0) / len, off = (o + .05 * Math.sin(u * 5 + ph)) * p.w * .5;
+      pts.push([p.x + p.nx * off, p.y + p.ny * off, p.w]);
+    }
+    if (pts.length < 3) continue;
+    polys.push(taper(pts.map(q => [q[0], q[1]]), t => Math.max(1.2, bw * pts[Math.min(pts.length - 1, Math.round(t * (pts.length - 1)))][2]) * Math.pow(Math.sin(Math.PI * t), .7)));
+  }
+  wash(polys, { key: 'rib-flow', E: 7, vmin: .5, vmax: 1.6, layers: 18, alpha: .07, depth: 3, amt: .26, wet: 3, tex: .45, tex2: .2,
+    fn: (gx, gy, gi) => occ(gi), edge: .7, er: 2, gran: 1, k: .13, pig: mix({ ult: .5, vio: .36, pay: .14 }) });
+  for (let k = 0; k < 3; k++) {
+    const o = (r() * 2 - 1) * .5, s0 = r() * .15, len = .14 + r() * .16, bw = .1 + r() * .1, pts = [];
+    for (let i = Math.floor(s0 * (n - 1)); i <= Math.min(n - 1, Math.floor((s0 + len) * (n - 1))); i++) {
+      const p = L[i], off = o * p.w * .5; pts.push([p.x + p.nx * off, p.y + p.ny * off, p.w]);
+    }
+    if (pts.length > 3) dry.push(taper(pts.map(q => [q[0], q[1]]), t => bw * pts[Math.min(pts.length - 1, Math.round(t * (pts.length - 1)))][2] * Math.pow(Math.sin(Math.PI * t), .5)));
+  }
+  wash(dry, { key: 'rib-dry', E: 10, vmin: .6, vmax: 1.8, layers: 12, alpha: .1, depth: 3, amt: .28, tex: .35, tex2: .2,
+    fn: (gx, gy, gi) => occ(gi), dry: .6, dryFn: (gx, gy, v) => .74 - .14 * Math.min(1, v) + .1 * NF3[gy * W + gx], gran: 1, k: .13, pig: mix({ ult: .5, vio: .34, pay: .16 }) });
+  // light caught in the vapour: long lifted streaks toward the sunward edge
+  const lp = [];
+  for (let k = 0; k < 8; k++) {
+    const o = -.1 - r() * .7, s0 = r() * .55, len = .15 + r() * .3, pts = [];
+    for (let i = Math.floor(s0 * (n - 1)); i <= Math.min(n - 1, Math.floor((s0 + len) * (n - 1))); i++) {
+      const p = L[i], off = o * p.tw * p.w * .5; pts.push([p.x + p.nx * off, p.y + p.ny * off]);
+    }
+    if (pts.length > 3) lp.push(taper(pts, t => (1.6 + L[Math.min(n - 1, Math.floor((s0 + t * len) * (n - 1)))].w / 55) * Math.pow(Math.sin(Math.PI * t), .8)));
+  }
+  const lb = lp.map((P, i) => base(P, 'rl' + i, { E: 6, vmin: .5, vmax: 1.4 })), lbb = bbOf(lb.map(q => q.P), 14);
+  if (lbb) {
+    const lm = blur(stack(lb, lbb, { key: 'rib-lift', layers: 8, alpha: .15, depth: 2, amt: .2 }), lbb.w, lbb.h, 2);
+    for (let i = 0; i < lm.length; i++) { const gi = (lbb.y0 + (i / lbb.w | 0)) * W + lbb.x0 + i % lbb.w; lm[i] *= occ(gi); }
+    lift(lm, lbb, .28);
+  }
+}
+
+/* ── the forest ─────────────────────────────────────────────────────────
+   Crowns are painted near → far. Each is painted around the crowns already
+   painted in front of it (an occluder canvas), and trees across the river are
+   cut at the waterline; open water is hidden where a nearer crown overhangs. */
+let RIVC, OXC, SANDC, OPEN, OPENV, HIDE, IPE;
+const OCC = cv(W, H), OX = ctxOf(OCC);
+const zOpenAt = y => y > HZ + .5 ? zOpen(y) : 1e9;
+function readOcc(bb) {
+  const d = OX.getImageData(bb.x0, bb.y0, bb.w, bb.h).data, o = new Float32Array(bb.w * bb.h);
+  for (let i = 0; i < o.length; i++) o[i] = d[i * 4 + 3] / 255;
+  return o;
+}
+function drawOcc(polys) { OX.fillStyle = '#000'; OX.beginPath(); for (const P of polys) trace(OX, P, true); OX.fill(); }
+const MIXES = {
+  yel: { sap: .5, cady: .33, oli: .17 }, sap: { sap: .8, hook: .2 }, oli: { oli: .62, sap: .28, och: .1 },
+  hok: { hook: .62, sap: .38 }, blu: { hook: .5, cer: .28, sap: .22 }, brz: { och: .45, oli: .35, sie: .2 },
+};
+function hazeMix(m, Z, amt = .38) {
+  const out = Object.assign({}, m), h = smooth(260, 1500, Z) * amt;
+  let s = 0; for (const k in out) s += out[k];
+  for (const k in out) out[k] *= (1 - h) / s;
+  out.cer = (out.cer || 0) + h * .65; out.ult = (out.ult || 0) + h * .35;
+  return mix(out);
+}
+function pickMix(c, r) {
+  const v = c * 1.3 + (r() - .5) * .5;
+  if (r() < .03 + .06 * smooth(.3, .8, c)) return 'brz';
+  return v < -.55 ? 'blu' : v < -.15 ? 'hok' : v < .2 ? 'sap' : v < .55 ? 'oli' : 'yel';
+}
+/* A crown is a cluster of leaf clumps: a big central one and a ring of smaller
+   ones, heavier on top. Its outline is the union seen from the centre, so the
+   edge is scalloped like broccoli, never a smooth pebble. Units: crown radii. */
+function crownClumps(g, r) {
+  const n = g.rx > 40 ? 7 + Math.floor(r() * 4) : g.rx > 15 ? 5 + Math.floor(r() * 3) : 3 + Math.floor(r() * 2), C = [];
+  C.push({ x: (r() - .5) * .14, y: (r() - .5) * .1 + .05, r: .56 + r() * .1 });
+  for (let k = 0; k < n; k++) {
+    const a = -Math.PI / 2 + ((k + .5) / n - .5) * TAU * .96 + (r() - .5) * .5, d = .42 + r() * .2, rr = .26 + r() * .2;
+    C.push({ x: Math.cos(a) * d, y: Math.sin(a) * d * .95, r: rr });
+  }
+  return C;
+}
+function outlineOf(C, g, nA) {
+  const P = [];
+  for (let i = 0; i < nA; i++) {
+    const a = i / nA * TAU, ca = Math.cos(a), sa = Math.sin(a);
+    let best = .3;
+    for (const c of C) {
+      const b = ca * c.x + sa * c.y, q = c.x * c.x + c.y * c.y - c.r * c.r, disc = b * b - q;
+      if (disc < 0) continue;
+      const tt = b + Math.sqrt(disc); if (tt > best) best = tt;
+    }
+    P.push([g.cx + ca * best * g.rx * .92, g.cy + sa * best * g.ry * .92]);
+  }
+  return P;
+}
+function buildGround() {
+  const full = { x0: 0, y0: 0, w: W, h: H };
+  RIVC = coverage(strip(RIV, p => [p.hw, p.hw], -WDROP), full);
+  OXC = coverage([].concat(...OXB.map(o => strip(o, p => [p.hw, p.hw], -WDROP))), full);
+  SANDC = coverage(SAND_Q, full);
+  OPEN = new Float32Array(N);
+  for (let i = 0; i < N; i++) OPEN[i] = Math.max(RIVC[i], OXC[i], SANDC[i]);
+  // crown shapes; trees for the ipê accents
+  const want = [[512, 800, 'pink'], [1500, 772, 'yellow']];
+  for (const [x, y, kind] of want) {
+    let best = null, bd = 1e9;
+    for (const t of TREES) { const g = crownGeo(t), d = Math.hypot(g.cx - x, g.cy - y); if (d < bd && !t.ipe) { bd = d; best = t; } }
+    if (best) { best.ipe = kind; best.D *= kind === 'yellow' ? 1.7 : 1.45; best.ht = 9; best.emer = true; }
+  }
+  for (const t of TREES) { const g = crownGeo(t); t.g = g; t.C = crownClumps(g, rngFor('cl' + t.id)); t.P = outlineOf(t.C, g, g.rx > 30 ? 64 : 36); }
+  for (const sl of SLICES) sl.items.forEach((it, k) => { it.g = crownGeo(it); it.P = blob(it.g.cx, it.g.cy, it.g.rx, it.g.ry, 'sl' + Math.round(sl.Z) + '_' + k, { n: 9, lump: .13 }); });
+  // open ground hidden by any nearer crown
+  HIDE = new Float32Array(N); const all = TREES.concat(...SLICES.map(s => s.items));
+  for (const t of all) {
+    if (openDist(t.X, t.Z) > t.D * 1.2 + 60) continue;
+    const bb = bbOf([t.P], 2); if (!bb) continue;
+    const cvg = coverage([t.P], bb);
+    for (let y = 0; y < bb.h; y++) {
+      const gy = bb.y0 + y; if (zOpenAt(gy) <= t.Z) continue;
+      for (let x = 0; x < bb.w; x++) { const gi = gy * W + bb.x0 + x; if (OPEN[gi] > 0 && cvg[y * bb.w + x] > HIDE[gi]) HIDE[gi] = cvg[y * bb.w + x]; }
+    }
+  }
+  OPENV = new Float32Array(N);
+  const nearW = blur(RIVC, W, H, 12, 2);
+  for (let i = 0; i < N; i++) {
+    const sandKeep = smooth(.015, .14, nearW[i] + .1 * NF2[i] + .06 * NF3[i]);
+    OPENV[i] = Math.max(RIVC[i], OXC[i], SANDC[i] * sandKeep) * (1 - HIDE[i]);
+  }
+  // flowering ipê crowns are reserved from the green washes (pink over green would go brown)
+  IPE = coverage(TREES.filter(t => t.ipe).map(t => t.P), { x0: 0, y0: 0, w: W, h: H });
+  for (const t of TREES.filter(t => t.ipe)) {
+    const bb = bbOf([t.P], 4); if (!bb) continue;
+    const front = TREES.filter(q => q.Z < t.Z && Math.abs(q.g.cx - t.g.cx) < q.g.rx + t.g.rx && Math.abs(q.g.cy - t.g.cy) < q.g.ry + t.g.ry + 20);
+    if (!front.length) continue;
+    const fc = coverage(front.map(q => q.P), bb);
+    for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) { const gi = (bb.y0 + y) * W + bb.x0 + x; IPE[gi] *= 1 - fc[y * bb.w + x]; }
+  }
+  const ib = blur(IPE, W, H, 2, 1); for (let i = 0; i < N; i++) IPE[i] = Math.min(1, ib[i] * 1.2);
+}
+/* Crown mask: in front of us nothing yet (occluder), cut at the far bank's waterline. */
+function crownMask(bb, Z) {
+  const occ = readOcc(bb), m = new Float32Array(bb.w * bb.h);
+  let vis = 0;
+  for (let y = 0; y < bb.h; y++) {
+    const gy = bb.y0 + y, far = zOpenAt(gy) < Z;
+    for (let x = 0; x < bb.w; x++) {
+      const i = y * bb.w + x, gi = gy * W + bb.x0 + x;
+      const v = (1 - occ[i]) * (far ? 1 - OPEN[gi] : 1);
+      m[i] = v; vis += v;
+    }
+  }
+  return { m, vis };
+}
+
+function paintFarBand() {
+  // the farthest forest: blue-green, soft, the horizon crisp
+  const n = gnoise('horz'), top = [];
+  for (let x = -60; x <= W + 60; x += 12) top.push([x, HOR + .8 * n(x / 40, .2) + .6 * n(x / 9, 3)]);
+  const nb = 22, bases = gradedBases(nb, 'farband', (l, r) => {
+    const yb = HOR + 16 + 200 * Math.pow((l + .5) / nb, 1.4), pts = top.map(p => [p[0], p[1]]);
+    pts.push([W + 60, yb]); for (let x = W + 60; x >= -60; x -= 160) pts.push([x, yb + 10 * Math.sin(x / 210 + l) + gauss(r) * 5]);
+    return pts;
+  }).map(b => { b.V = b.V.map((v, i) => b.P[i][1] < HOR + 3 ? .12 : v); return b; });
+  wash(null, { bases, bb: { x0: 0, y0: HOR - 12, w: W, h: 290 }, key: 'farband', pick: true, layers: nb, norm: nb * .45, alpha: .07,
+    depth: 3, amt: .26, wet: 3, cut: .05, tex: .22, tex2: .14, fn: (gx, gy, gi) => (1 - OPENV[gi]) * (1 - .3 * BLOOM[gi]) * (1 + 1.3 * BRIM[gi]), edge: 1.1, er: 2, gran: .8, k: .27,
+    pig: mix({ cer: .42, hook: .3, ult: .18, sap: .1 }) });
+  // distant rows: long horizontal strokes, dry, bluish
+  const r = rngFor('farrows'), polys = [];
+  for (let k = 0; k < 26; k++) {
+    const y = HOR + 4 + Math.pow(r(), 1.4) * 44, x0 = r() * W - 200, len = 150 + r() * 520, th = .6 + (y - HOR) * .05;
+    const pts = []; for (let x = x0; x <= x0 + len; x += 12) pts.push([x, y + 1.2 * Math.sin(x / 50 + k)]);
+    polys.push(taper(pts, t => th * Math.pow(Math.sin(Math.PI * t), .4)));
+  }
+  wash(polys, { key: 'farrows', E: 8, vmin: .5, vmax: 1.3, layers: 10, alpha: .12, depth: 2, amt: .2, tex: .3, dry: .5,
+    dryFn: (gx, gy, v) => .6 - .15 * Math.min(1, v), fn: (gx, gy, gi) => 1 - OPENV[gi], gran: .8, k: .3, pig: mix({ hook: .45, ult: .35, cer: .2 }) });
+}
+
+function paintCanopyBase() {
+  const bb = { x0: 0, y0: HOR, w: W, h: H - HOR }, openM = (gx, gy, gi) => (1 - OPENV[gi]) * (1 - .92 * IPE[gi]) * (1 - .3 * BLOOM[gi]) * (1 + 1.2 * BRIM[gi]);
+  const band = (key, n, yt0, yt1, yb0, yb1) => gradedBases(n, key, (l, r) => {
+    const u = (l + .5) / n, yt = lerp(yt0, yt1, u), yb = lerp(yb0, yb1, 1 - u), pts = [];
+    for (let x = -80; x <= W + 80; x += 160) pts.push([x, yt + 14 * Math.sin(x / 240 + l * 2.1) + gauss(r) * 8]);
+    pts.push([W + 80, yb]); for (let x = W + 80; x >= -80; x -= 160) pts.push([x, yb + 14 * Math.sin(x / 200 + l) + gauss(r) * 8]);
+    return pts;
+  });
+  wash(null, { bases: band('cmid', 26, 505, 560, 900, 700), bb, key: 'can-mid', pick: true, layers: 26, norm: 13, alpha: .07,
+    depth: 3, amt: .3, wet: 16, tex: .3, tex2: .15, fn: openM, gran: .8, k: .34, pig: mix({ sap: .42, hook: .34, cer: .24 }) });
+  wash(null, { bases: band('cnear', 26, 640, 800, H + 60, H + 60), bb, key: 'can-near', pick: true, layers: 26, norm: 13, alpha: .07,
+    depth: 3, amt: .3, wet: 22, tex: .4, tex2: .22, fn: openM, gran: 1.2, k: .27, pig: mix({ sap: .42, oli: .2, cady: .38 }) });
+}
+
+let SPK;
+function paintTrees() {
+  let count = 0; SPK = new Float32Array(N);
+  for (const t of TREES) {
+    const g = t.g;
+    if (g.cx + g.rx < -10 || g.cx - g.rx > W + 10 || g.cy - g.ry > H + 4) continue;
+    const bs = base(t.P, 'tc' + t.id, { E: Math.max(2.5, g.rx / 9), vmin: .4, vmax: 1.3, vf: .02 });
+    const bb = bbOf([bs.P], Math.ceil(g.rx * .2 + 12)); if (!bb) continue;
+    const { m, vis } = crownMask(bb, t.Z);
+    if (vis < 30) { drawOcc([t.P]); continue; }
+    count++;
+    const r = rngFor('tree' + t.id), near = 1 - smooth(300, 950, t.Z), L = Math.round(clamp(12 + g.rx * .22, 14, 30));
+    const uOf = (gx, gy) => ((gx - g.cx) * -LS[0] + (gy - g.cy) * -LS[1]) / g.rx;   // + toward the shaded lower left
+    if (t.ipe) { paintIpe(t, bs, bb, m, uOf, r, L); drawOcc([t.P]); continue; }
+    const key = pickMix(t.c, r), soft = r() < .45, econ = t.Z > 520 && NF1[Math.round(clamp(g.cy, 0, H - 1)) * W + Math.round(clamp(g.cx, 0, W - 1))] > -.05;
+    // 1 · light body: the sunlit green of the whole crown (some bleed softly into their neighbours)
+    let rim = null;
+    if (near > .3 && g.rx > 26) {          // where the brush ran dry along the sunlit rim
+      const cm = coverage([bs.P], bb), cb = blur(cm, bb.w, bb.h, Math.max(2, g.rx * .08), 1);
+      rim = new Float32Array(cm.length);
+      for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+        const i = y * bb.w + x, gx = bb.x0 + x, gy = bb.y0 + y;
+        rim[i] = (1 - smooth(.45, .92, cb[i])) * smooth(.1, -.7, uOf(gx, gy));
+      }
+    }
+    if (!econ) wash(null, { bases: [bs], bb, key: 'tb' + t.id, layers: L, alpha: .06, depth: 3, amt: .3, cut: soft ? 0 : .08, wet: soft ? 2 + g.rx * .05 : 0,
+      tex: .3, tex2: .16, tex3: .08, edge: soft ? .5 : .9, er: 2,
+      fn: (gx, gy, gi, i) => m[i] * (rim ? 1 - .9 * rim[i] * (1 - smooth(.34, .56, HMS[gi] + .3 * NF3[gi])) : 1), gran: 1.7,
+      k: lerp(.26, .32, near) * (key === 'yel' ? .9 : 1), pig: hazeMix(MIXES[key], t.Z) });
+    if (near > .3 && !econ && g.rx > 22) {   // a second colour dropped in while wet
+      const ch = [], warm = [];
+      for (let k = 0; k < 1 + Math.floor(r() * 3); k++) {
+        const lit = r() < .55, a = lit ? -.9 + (r() - .5) * 1.2 : 2.2 + (r() - .5) * 1.2, d = .2 + r() * .35, rr = g.rx * (.25 + r() * .2);
+        (lit ? warm : ch).push(blob(g.cx + Math.cos(a) * d * g.rx, g.cy + Math.sin(a) * d * g.ry, rr, rr * g.ry / g.rx, 'chg' + t.id + '_' + k, { n: 9, lump: .25 }));
+      }
+      const cm2 = coverage([bs.P], bb);
+      if (warm.length) wash(warm, { bb, key: 'cw' + t.id, E: 4, vmin: .6, vmax: 1.6, layers: 12, alpha: .08, depth: 3, amt: .3, wet: Math.max(2, g.rx * .1),
+        tex: .3, fn: (gx, gy, gi, i) => m[i] * cm2[i], gran: 1, k: .2, pig: hazeMix(r() < .5 ? { cady: .6, och: .4 } : { och: .6, sie: .2, cady: .2 }, t.Z) });
+      if (ch.length) wash(ch, { bb, key: 'cc' + t.id, E: 4, vmin: .6, vmax: 1.6, layers: 12, alpha: .08, depth: 3, amt: .3, wet: Math.max(2, g.rx * .1),
+        tex: .3, fn: (gx, gy, gi, i) => m[i] * cm2[i], gran: 1.2, k: .22, pig: hazeMix({ ult: .5, cer: .3, hook: .2 }, t.Z) });
+    }
+    if (near > .55 && g.rx > 34) {           // sunlit flecks, lifted later (paper white)
+      for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+        const i = y * bb.w + x, gx = bb.x0 + x, gy = bb.y0 + y, gi = gy * W + gx, u = uOf(gx, gy);
+        if (m[i] < .5 || u > -.35) continue;
+        const d2 = Math.hypot((gx - g.cx) / g.rx, (gy - g.cy) / g.ry); if (d2 > .92) continue;
+        const v = smooth(-.4, -.85, u) * smooth(.7, .8, .55 * HMS[gi] + .8 * NF3[gi] + .2 * NF2[gi] + .1);
+        if (v > SPK[gi]) SPK[gi] = v;
+      }
+    }
+    // 2 · shade dropped in wet: darker to the lower left, soft inside, crisp at the outline
+    const lean = .15 + r() * .35, dark = (.75 + r() * .5) * (econ ? .7 : 1);
+    wash(null, { bases: [bs], bb, key: 'td' + t.id, layers: L, alpha: .06, depth: 3, amt: .3, cut: econ ? 0 : .08, wet: econ ? 2 + g.rx * .12 : 0, tex: .32, tex2: .18, tex3: .06,
+      edge: 1.1, er: 2, fn: (gx, gy, gi, i) => m[i] * Math.pow(smooth(-.3 - lean, .9, uOf(gx, gy)), 1.35), gran: 1.8,
+      k: lerp(.3, .8, near) * dark, pig: hazeMix(key === 'blu' || key === 'hok' ? { hook: .55, pay: .25, ult: .2 } : { hook: .45, sap: .2, pay: .2, ult: .15 }, t.Z, .32) });
+    // 3 · crevices: the shaded underside of the upper clumps, crisp (wet on dry)
+    if (g.rx > 14 && !econ && r() > .35 * smooth(420, 950, t.Z)) {
+      const sh = [];
+      for (const c of t.C) {
+        if (c.y > .25 || c.r > .5) continue;
+        const cx = g.cx + c.x * g.rx * .92, cy = g.cy + c.y * g.ry * .92, rx = c.r * g.rx * .92, ry = c.r * g.ry * .92;
+        sh.push(crescent(cx, cy, rx, ry, .5 + r() * .3, 3.3 + r() * .5, .3 + r() * .25, 'cv' + t.id + '_' + sh.length, { n: 12, lk: 3, la: .35 }));
+      }
+      if (sh.length) {
+        const sb = sh.map((P, k) => base(P, 'cvb' + t.id + '_' + k, { E: Math.max(1.5, g.rx / 14), vmin: .35, vmax: 1.2, vf: .03 }));
+        wash(null, { bases: sb, bb, key: 'tcv' + t.id, layers: 14, alpha: .09, depth: 2, amt: .25, cut: .12, tex: .3, edge: 1.3, er: 1.5,
+          fn: (gx, gy, gi, i) => m[i] * (.45 + .55 * smooth(-.6, .6, uOf(gx, gy))), gran: 1.6, k: lerp(.3, .62, near), pig: hazeMix({ hook: .45, pay: .35, ult: .2 }, t.Z, .3) });
+      }
+    }
+    drawOcc([t.P]);
+  }
+  T.trees = count;
+}
+function liftSparkle() {
+  const bb = { x0: 0, y0: HOR, w: W, h: H - HOR }, m = new Float32Array(bb.w * bb.h);
+  for (let i = 0; i < m.length; i++) m[i] = SPK[HOR * W + i];
+  lift(m, bb, .8);
+}
+
+function paintIpe(t, bs, bb, m, uOf, r, L) {
+  const g = t.g, pink = t.ipe === 'pink';
+  wash(null, { bases: [bs], bb, key: 'ipe-u' + t.id, layers: L, alpha: .06, depth: 3, amt: .3, cut: .08, tex: .3, tex2: .15, edge: 1.1,
+    fn: (gx, gy, gi, i) => m[i], gran: .5, k: .26, pig: hazeMix(pink ? { rose: .78, cadr: .12, vio: .1 } : { cady: .8, och: .2 }, t.Z, .2) });
+  // blossom clusters, thicker on the sunlit side, merging wet
+  const dabs = [];
+  for (let k = 0; k < 44; k++) {
+    const a = r() * TAU, d = Math.sqrt(r()), x = g.cx + Math.cos(a) * d * g.rx * .82, y = g.cy + Math.sin(a) * d * g.ry * .82;
+    if (r() > .4 + .6 * smooth(.8, -.6, uOf(x, y))) continue;
+    const rk = g.rx * (.08 + r() * .08);
+    dabs.push(blob(x, y, rk, rk * .78, 'dab' + t.id + '_' + k, { n: 8, lump: .3 }));
+  }
+  const db = dabs.map((P, k) => base(P, 'db' + t.id + '_' + k, { E: 2.5, vmin: .5, vmax: 1.5 }));
+  wash(null, { bases: db, bb, key: 'ipe-f' + t.id, layers: 12, alpha: .08, depth: 3, amt: .3, cut: .06, wet: 1, tex: .25, edge: 1.2, er: 2,
+    fn: (gx, gy, gi, i) => m[i], gran: .4, k: .4, pig: hazeMix(pink ? { rose: .86, cadr: .08, vio: .06 } : { cady: .75, och: .25 }, t.Z, .15) });
+  wash(null, { bases: [bs], bb, key: 'ipe-s' + t.id, layers: L, alpha: .06, depth: 3, amt: .3, cut: .08, tex: .3, edge: .9,
+    fn: (gx, gy, gi, i) => m[i] * Math.pow(smooth(-.2, .95, uOf(gx, gy)), 1.3), gran: 1.2, k: .56,
+    pig: hazeMix(pink ? { rose: .35, vio: .42, ult: .23 } : { och: .45, oli: .35, sie: .2 }, t.Z, .25) });
+  const sh = [];
+  for (const c of t.C) {
+    if (c.y > .25 || c.r > .5) continue;
+    sh.push(crescent(g.cx + c.x * g.rx * .92, g.cy + c.y * g.ry * .92, c.r * g.rx * .92, c.r * g.ry * .92, .5, 3.4, .35, 'ipc' + t.id + sh.length, { n: 12, lk: 3, la: .35 }));
+  }
+  if (sh.length) wash(null, { bases: sh.map((P, k) => base(P, 'ipcb' + t.id + k, { E: 1.8, vmin: .35, vmax: 1.2 })), bb, key: 'ipe-c' + t.id, layers: 12,
+    alpha: .09, depth: 2, amt: .25, cut: .12, tex: .3, edge: 1.3, er: 1.5, fn: (gx, gy, gi, i) => m[i], gran: .8, k: .42,
+    pig: hazeMix(pink ? { rose: .4, vio: .4, ult: .2 } : { och: .5, sie: .3, oli: .2 }, t.Z, .25) });
+  // bare grey branches glimpsed through the blossom
+  const br = [];
+  for (let k = 0; k < 5; k++) {
+    const a = -Math.PI / 2 + (r() - .5) * 2, x0 = g.cx - g.rx * .1, y0 = g.cy + g.ry * .5, Lb = g.ry * (.5 + r() * .35);
+    br.push(brushStroke(bezier([x0, y0], [x0 + Math.cos(a) * Lb * .3, y0 + Math.sin(a) * Lb * .35], [x0 + Math.cos(a) * Lb * .7, y0 + Math.sin(a) * Lb * .6], [x0 + Math.cos(a) * Lb, y0 + Math.sin(a) * Lb], 12), clamp(g.rx / 60, .6, 1.2), 'ipb' + t.id + k));
+  }
+  wash(br, { bb, key: 'ipe-b' + t.id, E: 1.5, vmin: .4, vmax: 1, layers: 8, alpha: .18, depth: 2, amt: .15, cut: .15, tex: .25, edge: 1, er: 1,
+    fn: (gx, gy, gi, i) => m[i] * (1 - smooth(-.2, -.8, uOf(gx, gy)) * .7), gran: .8, k: .45, pig: mix({ pay: .55, sie: .3, vio: .15 }) });
+}
+
+function paintSlices() {
+  let items = 0;
+  for (const sl of SLICES) {
+    const vis = sl.items.filter(it => it.g.cx + it.g.rx > -8 && it.g.cx - it.g.rx < W + 8);
+    if (!vis.length) continue;
+    items += vis.length;
+    const bb = bbOf(vis.map(it => it.P), 12); if (!bb) continue;
+    const { m } = crownMask(bb, sl.Z), far = smooth(960, 6500, sl.Z), r = rngFor('slc' + Math.round(sl.Z));
+    const sh = vis.map((it, k) => base(crescent(it.g.cx, it.g.cy, it.g.rx, it.g.ry, .25, 4.05, .5 + r() * .25, 'ss' + Math.round(sl.Z) + '_' + k, { n: 10, lk: 4, la: .3 }),
+      'ssb' + Math.round(sl.Z) + '_' + k, { E: Math.max(1.5, it.g.rx / 4), vmin: .4, vmax: 1.2 }));
+    wash(null, { bases: sh, bb, key: 'sls' + Math.round(sl.Z), layers: 10, alpha: .12, depth: 2, amt: .25, cut: far > .35 ? 0 : .1, wet: far > .35 ? 1.2 : 0, tex: .3, tex2: .2,
+      edge: 1.1, er: 1.5, fn: (gx, gy, gi, i) => m[i] * smooth(-.35, .3, NF1[gi] + .6 * NF2[gi] - .1), gran: .9, k: lerp(.4, .1, Math.sqrt(far)), pig: hazeMix({ hook: .5, pay: .25, ult: .25 }, sl.Z, .5) });
+    const some = vis.filter(() => r() < .3);
+    if (some.length) {
+      const bbs = some.map((it, k) => base(it.P, 'slb' + Math.round(sl.Z) + '_' + k, { E: Math.max(1.5, it.g.rx / 4), vmin: .4, vmax: 1.2 }));
+      wash(null, { bases: bbs, bb, key: 'slb' + Math.round(sl.Z), layers: 8, alpha: .12, depth: 2, amt: .25, cut: .1, tex: .3,
+        edge: .8, fn: (gx, gy, gi, i) => m[i], gran: .8, k: lerp(.22, .1, far), pig: hazeMix(MIXES[r() < .5 ? 'yel' : 'oli'], sl.Z, .45) });
+    }
+    drawOcc(vis.map(it => it.P));
+  }
+  T.rowItems = items;
+}
+
+let WALL;
+function paintGaps() {
+  const occ = readOcc({ x0: 0, y0: 0, w: W, h: H }), top = HOR + 14;
+  WALL = new Float32Array(N);
+  for (let x = 0; x < W; x++) for (let y = H - 1; y > HOR + 4; y--) {
+    const i = y * W + x;
+    if (OPENV[i] < .5 || OPENV[i - W] >= .5) continue;          // top edge of open water / sand
+    const hw = FL * 9 / zOpenAt(y);
+    for (let k = 1; k <= hw + 2; k++) {
+      const j = (y - k) * W + x; if (y - k <= HOR) break;
+      if (occ[j] > .6 || OPENV[j] > .5) break;
+      WALL[j] = Math.max(WALL[j], 1 - .35 * k / hw);
+    }
+  }
+  const wb = blur(WALL, W, H, 1, 1); WALL = wb;
+  const mk = (gx, gy, gi) => (1 - occ[gi]) * (1 - OPENV[gi]) * (1 - IPE[gi]) * (1 - .8 * WALL[gi]);
+  const rect = [[-60, top], [W + 60, top], [W + 60, H + 60], [-60, H + 60]];
+  // deep shade seen between crowns: strongest near us, bluer and lighter with distance
+  wash([rect], { key: 'gap-near', E: 60, vmin: .6, vmax: 1.4, layers: 14, alpha: .1, depth: 3, amt: .25, bb: { x0: 0, y0: top - 10, w: W, h: H - top + 10 },
+    tex: .3, tex2: .2, fn: (gx, gy, gi) => mk(gx, gy, gi) * smooth(560, 1000, gy), edge: 1.4, er: 2, gran: .9, k: 1.12, pig: mix({ hook: .42, pay: .36, ult: .22 }) });
+  wash([rect], { key: 'gap-far', E: 60, vmin: .6, vmax: 1.4, layers: 14, alpha: .1, depth: 3, amt: .25, bb: { x0: 0, y0: top - 10, w: W, h: H - top + 10 },
+    tex: .3, tex2: .2, fn: (gx, gy, gi) => mk(gx, gy, gi) * smooth(top, 560, gy) * (1 - smooth(640, 900, gy)), edge: 1.2, er: 2, gran: .9, k: .3,
+    pig: mix({ hook: .35, ult: .35, cer: .3 }) });
+}
+
+/* The far bank's forest edge faces the sun (behind us): lit green, trunks and
+   shadowed hollows, then mirrored more darkly in the water. */
+function paintWall() {
+  const bb = { x0: 0, y0: HOR, w: W, h: H - HOR }, vn = gnoise('wall');
+  const d = new Float32Array(bb.w * bb.h);
+  for (let i = 0; i < d.length; i++) d[i] = WALL[HOR * W + i];
+  finish(d, bb, { key: 'wall', tex: .3, tex2: .2, fn: (gx, gy) => .8 + .35 * smooth(-.3, .5, vn(gx / 7, gy / 16)), edge: 1, er: 2, gran: 1, k: .46,
+    pig: hazeMix({ sap: .45, oli: .3, hook: .25 }, zOpenAt(gy0Of(bb)), .2) });
+  const r = rngFor('trunks'), tr = [];
+  for (let x = 2; x < W; x += 5 + r() * 16) {
+    for (let y = H - 2; y > HOR + 6; y--) {
+      const gi = y * W + Math.round(x);
+      if (WALL[gi] > .5 && WALL[gi + W] <= .5) break;        // not what we want: find the wall's foot
+      if (WALL[gi] > .5 && OPENV[gi + W] > .5) {
+        const hw = FL * 9 / zOpenAt(y), h = hw * (.4 + r() * .6), lean = (r() - .5) * .25;
+        tr.push(brushStroke([[x, y + 1], [x + lean * h * .5, y - h * .5], [x + lean * h, y - h]], clamp(hw / 22, .5, 1.3), 'tr' + tr.length, { lift: .8 }));
+        break;
+      }
+    }
+  }
+  if (tr.length) wash(tr, { key: 'trunks', E: 1.5, vmin: .4, vmax: 1, layers: 8, alpha: .18, depth: 2, amt: .15, cut: .15, tex: .2, edge: 1, er: 1,
+    fn: (gx, gy, gi) => Math.min(1, WALL[gi] * 1.4), gran: .8, k: .7, pig: mix({ pay: .5, hook: .3, sie: .2 }) });
+}
+const gy0Of = bb => bb.y0 + bb.h * .3;
+
+/* ── the river: white water from the Andes, café-au-lait near us, a mirror of
+   the pale horizon sky far away (Fresnel); the far bank's forest wall is
+   reflected and casts shade on the water; sandbars on the inside of bends. */
+function paintRiver() {
+  const WV = new Float32Array(N), SV = new Float32Array(N), OV = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const h = 1 - HIDE[i];
+    WV[i] = RIVC[i] * h; OV[i] = Math.max(0, OXC[i] - RIVC[i]) * h; SV[i] = Math.max(0, SANDC[i] - RIVC[i] - OXC[i]) * h;
+  }
+  // distance down from the nearest bank above, per water pixel
+  const DB = new Float32Array(N);
+  for (let x = 0; x < W; x++) { let last = -1e4; for (let y = HOR; y < H; y++) { const i = y * W + x; if (WV[i] + OV[i] < .5) last = y; DB[i] = y - last; } }
+  const bbAll = { x0: 0, y0: HOR - 2, w: W, h: H - HOR + 2 }, sn = gnoise('spark'), rn = gnoise('refl');
+  const sub = arr => { const o = new Float32Array(bbAll.w * bbAll.h); for (let i = 0; i < o.length; i++) o[i] = arr[bbAll.y0 * W + i]; return o; };
+  // glitter: the brush dragged across the water skips the valleys of the paper
+  const glitter = (gx, gy, gi) => {
+    const band = smooth(.3, .7, .5 + .5 * sn(gx / 70, gy / 5)) * (1 - smooth(640, 760, gy));
+    return band * (1 - smooth(.42, .6, HMS[gi] + .2 * NF3[gi]));
+  };
+  const water = (key, dens, pig, k, extra) => finish(dens, bbAll, Object.assign({ key, tex: .25, tex2: .12, tex3: .05, edge: .6, er: 2, gran: 1, k, pig }, extra || {}));
+  // pale gold of the white-water river; the sky's silver takes over with distance (Fresnel)
+  water('riv-gold', sub(WV), mix({ och: .58, sie: .16, rose: .08, cer: .18 }), .24,
+    { fn: (gx, gy, gi) => (.35 + .65 * smooth(600, 1000, gy)) * (1 - .92 * glitter(gx, gy, gi)) });
+  water('riv-sky', sub(WV), mix({ cer: .55, ult: .2, rose: .25 }), .1, { fn: (gx, gy, gi) => smooth(560, 950, gy) * (1 - glitter(gx, gy, gi)) });
+  // the far bank's wall mirrored in the water, with its shade: a band broken by ripples
+  water('riv-refl', sub(WV), mix({ hook: .42, sap: .3, oli: .28 }), .34, { cut: .05, fn: (gx, gy, gi) => {
+    const rh = FL * 7 / zOpenAt(gy), d = DB[gi];
+    if (d > rh * 1.8) return 0;
+    const rip = smooth(.15, .5, .5 + .5 * rn(gx / 45, gy / 1.8) + .25), streak = .7 + .45 * rn(gx / 4, gy / 30);
+    return (1 - smooth(rh * .45, rh * 1.5, d)) * rip * streak;
+  }, edge: 1.1, tex: .35 });
+  // ripples: a drier brush dragged across the current
+  const rr = rngFor('ripples'), rp = [];
+  for (let k = 0; k < 90; k++) {
+    const y = lerp(560, 1075, Math.pow(rr(), .7)), x = rr() * W, L = FL * (18 + rr() * 30) / zOpenAt(y), th = FL * .5 / zOpenAt(y);
+    const gi = Math.round(y) * W + Math.round(clamp(x, 0, W - 1)); if (WV[gi] < .5) continue;
+    rp.push(taper([[x - L / 2, y], [x, y + (rr() - .5) * th], [x + L / 2, y + (rr() - .5) * th]], u => (th * .6 + .4) * Math.pow(Math.sin(Math.PI * u), .5)));
+  }
+  if (rp.length) wash(rp, { key: 'ripples', E: 3, vmin: .5, vmax: 1.2, layers: 10, alpha: .12, depth: 2, amt: .2, tex: .3, dry: .5,
+    dryFn: (gx, gy, v) => .6 - .15 * Math.min(1, v), fn: (gx, gy, gi) => WV[gi], gran: 1, k: .3, pig: mix({ och: .4, cer: .3, pay: .3 }) });
+  // oxbows: still, greener water with a pale streak of sky
+  water('oxbow', sub(OV), mix({ hook: .4, oli: .36, cer: .24 }), .42, { fn: (gx, gy, gi) => 1 - .65 * smooth(.55, .8, .5 + .5 * rn(gx / 25, gy / 3)) });
+  // point bars: pale sand, granulating, darker where wet
+  const wetEdge = blur(RIVC, W, H, 2, 1);
+  water('sand', sub(SV), mix({ och: .68, sie: .22, rose: .1 }), .14, { fn: (gx, gy, gi) => (1 + .6 * smooth(.1, .45, wetEdge[gi])) * (.75 + .5 * smooth(-.3, .4, NF2[gi])), gran: 1.6, edge: .5, cut: 0, wet: 1.5 });
+}
+
+/* Cloud shadows on the forest: big, soft, cool; they break the canopy into masses. */
+function paintCloudShadows() {
+  const spots = [[380, 612, 520, 46, 'cs1'], [1540, 724, 440, 62, 'cs2'], [990, 556, 300, 20, 'cs3'], [70, 880, 330, 100, 'cs4'], [1180, 640, 260, 30, 'cs5'], [760, 700, 330, 44, 'cs6'], [1700, 580, 300, 22, 'cs7']];
+  const polys = spots.map(([x, y, rx, ry, k]) => blob(x, y, rx, ry, k, { n: 16, lump: .22 }));
+  wash(polys, { key: 'cloudshadow', E: 30, vmin: .6, vmax: 2, layers: 30, alpha: .05, depth: 3, amt: .32, wet: 24, tex: .3, tex2: .15,
+    fn: (gx, gy, gi) => 1 - .5 * IPE[gi], gran: 1, k: .36, pig: mix({ ult: .5, vio: .22, cer: .28 }) });
+}
+
+/* Morning haze over the far forest, lifted out with a damp brush. */
+function liftHaze() {
+  const bb = { x0: 0, y0: HOR - 30, w: W, h: 90 }, m = new Float32Array(bb.w * bb.h), n = gnoise('haze');
+  for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+    const gy = bb.y0 + y, v = smooth(HOR - 26, HOR + 2, gy) * (1 - smooth(HOR + 8, HOR + 58, gy));
+    m[y * bb.w + x] = v * (.6 + .4 * (.5 + .5 * n(x / 180, y / 30)));
+  }
+  lift(m, bb, .3);
+}
+
+/* ── transpiration: pale wisps lifted out of the canopy, rising toward the cloud bases ── */
+function liftWisps() {
+  // only under the big cloud it feeds: soft and broad, never vent-like columns
+  const W8 = [[905, 600, 150, -26], [968, 624, 120, -18], [1060, 606, 140, -22], [1180, 616, 150, -28], [1260, 628, 110, -16]];
+  const polys = [], r = rngFor('wisps');
+  W8.forEach(([x, y, h, lean], k) => {
+    const ph = r() * TAU, curl = 8 + r() * 12, np = 6 + Math.floor(h / 30);
+    let u = 0;
+    for (let i = 0; i < np; i++) {
+      u += (.6 + r() * .8) / np; if (u > 1) break;
+      if (r() < .22) continue;                                   // gaps: the wisp breaks up
+      const px = x + lean * u * u + curl * Math.sin(u * 3.2 + ph) * u + (r() - .5) * 8 * u, py = y - h * u;
+      const rr = 3 + 13 * u + 4 * r();
+      polys.push(blob(px, py, rr * (.8 + r() * .7), rr * (.5 + r() * .5), 'wp' + k + '_' + i, { n: 10, lump: .35, rot: (r() - .5) * 1.2 }));
+    }
+    polys.push(blob(x + (r() - .5) * 6, y + 2, 7 + r() * 5, 3 + r() * 2, 'wb' + k, { n: 8, lump: .3 }));   // where it leaves the crowns
+  });
+  const bases = polys.map((P, i) => base(P, 'wisp' + i, { E: 3, vmin: .7, vmax: 2.2 })), bb = bbOf(bases.map(b => b.P), 40);
+  const m = blur(stack(bases, bb, { key: 'wisps', layers: 16, alpha: .07, depth: 3, amt: .36 }), bb.w, bb.h, 11);
+  for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+    const gy = bb.y0 + y, i = y * bb.w + x;
+    m[i] = Math.min(1, m[i] * 1.2) * (1 - .6 * smooth(HOR - 10, HOR - 60, gy));
+  }
+  lift(m, bb, .24);
+}
+
+/* ── fine brush: tapered strokes ──────────────────────────────────────────── */
+function brushStroke(pts, w0, key, o = {}) {
+  const r = rngFor('bs:' + key), n = gnoise('bsn:' + key), P = resample(pts, 1.2), ph = r() * 50;
+  return taper(P, u => w0 * (o.press ?? 1) * (u < .08 ? .55 + .45 * u / .08 : 1) * (1 - (o.lift ?? .6) * smooth(.55, 1, u)) * (1 + .18 * n(u * 6 + ph, .5)));
+}
+function paintBranches() {
+  const r = rngFor('branches'), polys = [];
+  for (const t of TREES) {
+    const g = t.g; if (!t.ipe) continue;
+    const nb = t.ipe ? 5 : 2 + Math.floor(r() * 2), x0 = g.cx - g.rx * .12, y0 = g.cy + g.ry * .55;
+    for (let k = 0; k < nb; k++) {
+      const a = -Math.PI / 2 + (r() - .5) * 1.9, L = g.ry * (.45 + r() * .35), mx = x0 + Math.cos(a) * L * .5, my = y0 + Math.sin(a) * L * .5;
+      const ex = x0 + Math.cos(a) * L, ey = y0 + Math.sin(a) * L;
+      polys.push(brushStroke(bezier([x0, y0], [mx - 4, my + 3], [mx + 3, my - 2], [ex, ey], 14), clamp(g.rx / 42, .8, 1.8), 'br' + t.id + k));
+      const fa = a + (r() < .5 ? -1 : 1) * (.5 + r() * .4), fl = L * (.3 + r() * .2);
+      polys.push(brushStroke([[mx, my], [mx + Math.cos(fa) * fl * .5, my + Math.sin(fa) * fl * .5], [mx + Math.cos(fa) * fl, my + Math.sin(fa) * fl]], clamp(g.rx / 70, .6, 1.1), 'bf' + t.id + k));
+    }
+  }
+  wash(polys, { key: 'branches', E: 2, vmin: .4, vmax: 1, layers: 8, alpha: .2, depth: 2, amt: .15, cut: .15, tex: .2, edge: 1.2, er: 1,
+    fn: (gx, gy, gi) => 1 - OPENV[gi], gran: .8, k: .6, pig: mix({ pay: .5, sie: .3, hook: .2 }) });
+}
+
+/* ── two scarlet macaws, flying low over the near canopy (lifted, then painted) ── */
+function paintMacaws() {
+  // ~14 px span: a 1 m bird about 80 m above the canopy, 40 m below us
+  const birds = [[334, 948, .22, 1.3, 'up'], [396, 924, .12, 1.22, 'down']];
+  const parts = { red: [], yel: [], blu: [], cream: [] }, sil = [];
+  const T2 = (pts, w) => taper(resample(pts, .5), w);
+  for (const [x, y, head, sc, pose] of birds) {
+    const c = Math.cos(head), s2 = -Math.sin(head);
+    const at = (f, l) => [x + (c * f - s2 * l) * sc, y + (s2 * f + c * l) * sc];   // f forward, l to the left wing
+    const body = [at(-2.5, 0), at(1.5, 0), at(4.5, 0)], tail = [at(-2.5, 0), at(-7, .4), at(-12, .9)];
+    parts.red.push(T2(body, u => 1.05 * sc * Math.sin(Math.PI * (.2 + .65 * u)) + .2), T2(tail, u => .75 * sc * (1 - u) + .15));
+    parts.blu.push(T2(tail.slice(1).map((p, i) => i ? p : [(tail[1][0] + tail[2][0]) / 2, (tail[1][1] + tail[2][1]) / 2]), u => .45 * sc * (1 - u) + .1));
+    const span = pose === 'up' ? 7 : 5.2, sweep = pose === 'up' ? -3.8 : -4.8;
+    for (const sd of [-1, 1]) {
+      const w = [at(.6, sd * .6), at(.3 + sweep * .15, sd * span * .52), at(sweep, sd * span)];   // bent at the wrist, tips swept back
+      parts.red.push(T2([w[0], w[1]], u => 1.1 * sc * (1 - .25 * u)));
+      parts.yel.push(T2([w[1], [(w[1][0] * 2 + w[2][0]) / 3, (w[1][1] * 2 + w[2][1]) / 3]], u => .85 * sc));
+      parts.blu.push(T2([[(w[1][0] * 2 + w[2][0]) / 3, (w[1][1] * 2 + w[2][1]) / 3], w[2]], u => .8 * sc * (1 - .8 * u) + .1));
+      sil.push(T2(w, u => 1.2 * sc));
+    }
+    parts.cream.push(blob(at(4.6, 0)[0], at(4.6, 0)[1], .8 * sc, .7 * sc, 'mh' + x, { n: 7, lump: .1 }));
+    sil.push(T2(body, u => 1.4 * sc), T2(tail, u => .9 * sc * (1 - u) + .3));
+  }
+  const sb = bbOf(sil, 6), cvg = coverage(sil, sb);
+  lift(cvg, sb, .9);
+  const paint = (polys, key, pig, k) => wash(polys, { key, E: .8, vmin: .3, vmax: .7, layers: 6, alpha: .25, depth: 1, amt: .08, cut: .1, tex: .15, edge: .8, er: 1, gran: .3, k, pig, pad: 8 });
+  paint(parts.yel, 'mac-y', mix({ cady: .9, och: .1 }), .95);
+  paint(parts.red, 'mac-r', mix({ cadr: .85, rose: .15 }), 1.2);
+  paint(parts.blu, 'mac-b', mix({ ult: .55, cer: .45 }), 1.0);
+  paint(parts.cream, 'mac-c', mix({ och: 1 }), .12);
+}
+
+/* ── title, lettered with a round brush in indigo ─────────────────────────── */
+function paintTitle() {
+  const L = lettering('RIVERS IN THE SKY', 96, 112, 38, { align: 'left', key: 'rits', wob: .32, weight: 1.55, track: 2.3 });
+  const main = [], tails = [], r = rngFor('title'), pieces = [];
+  const ext = (p, q, d) => { const l = Math.hypot(p[0] - q[0], p[1] - q[1]) || 1; return [p[0] + (p[0] - q[0]) / l * d, p[1] + (p[1] - q[1]) / l * d]; };
+  for (const st of L.strokes) {
+    if (st.length < 2) continue;
+    // a brush lifts at a sharp corner: split there, and let the pieces overlap
+    let cur = [st[0]];
+    for (let i = 1; i < st.length; i++) {
+      cur.push(st[i]);
+      if (i < st.length - 1) {
+        const a = Math.atan2(st[i][1] - st[i - 1][1], st[i][0] - st[i - 1][0]), b2 = Math.atan2(st[i + 1][1] - st[i][1], st[i + 1][0] - st[i][0]);
+        let d = Math.abs(b2 - a); if (d > Math.PI) d = TAU - d;
+        if (d > .85) { pieces.push(cur); cur = [st[i]]; }
+      }
+    }
+    pieces.push(cur);
+  }
+  for (const [k, pc] of pieces.entries()) {
+    if (pc.length < 2) continue;
+    const closed = Math.hypot(pc[0][0] - pc[pc.length - 1][0], pc[0][1] - pc[pc.length - 1][1]) < 1;
+    const st = closed ? pc : [ext(pc[0], pc[1], 1.7), ...pc, ext(pc[pc.length - 1], pc[pc.length - 2], 1.4)];
+    let P = resample(st, 1.1); const n = P.length; if (n < 3) continue;
+    const bow = (r() - .5) * 1.4;      // a hand-drawn stroke is never quite straight
+    P = P.map((p, i) => { const q = P[Math.min(n - 1, i + 1)], o = P[Math.max(0, i - 1)], l = Math.hypot(q[0] - o[0], q[1] - o[1]) || 1;
+      const b = bow * Math.sin(Math.PI * i / (n - 1)); return [p[0] - (q[1] - o[1]) / l * b, p[1] + (q[0] - o[0]) / l * b]; });
+    const w0 = L.lw * .47 * (.88 + r() * .24), pn = gnoise('tp' + k);
+    const dirW = P.map((p, i) => { const q = P[Math.min(n - 1, i + 1)], o = P[Math.max(0, i - 1)]; const a = Math.atan2(q[1] - o[1], q[0] - o[0]); return .8 + .3 * Math.abs(Math.sin(a)); });
+    const wf = u => { const i = Math.min(n - 1, Math.round(u * (n - 1))); return w0 * dirW[i] * (u < .08 ? .9 + .42 * u / .08 : 1.32 - .5 * u) * (1 + .14 * pn(u * 5, .3)) * (u > .94 ? 1 - (u - .94) * 5 : 1); };
+    if (r() < .3 && n > 14) {
+      const cutAt = Math.floor(n * .8);
+      main.push(taper(P.slice(0, cutAt + 1), u => wf(u * cutAt / (n - 1))));
+      tails.push(taper(P.slice(cutAt - 1), u => wf((cutAt - 1 + u * (n - cutAt)) / (n - 1))));
+    } else main.push(taper(P, wf));
+  }
+  const pig = mix({ pay: .62, ult: .3, vio: .08 });
+  wash(main, { key: 'title', E: 2, vmin: .4, vmax: 1, layers: 9, alpha: .18, depth: 2, amt: .12, cut: .15, tex: .25, tex2: .1, edge: 1.5, er: 1.5, gran: 1, k: .92, pig, pad: 10 });
+  wash(tails, { key: 'title-dry', E: 2, vmin: .4, vmax: 1, layers: 8, alpha: .18, depth: 2, amt: .14, cut: .12, tex: .2, dry: .38,
+    dryFn: (gx, gy, v) => .5 - .22 * Math.min(1, v), gran: 1, k: .9, pig, pad: 10 });
+}
+
+/* The flying river's far leg, turning south along the foot of the Andes: the
+   vapour veils the mountains' feet, so it is lifted out as a pale misty band. */
+function liftRibbonFar() {
+  const L = RIB.L.filter(p => p.x < 1180), polys = [];
+  if (L.length < 3) return;
+  polys.push(taper(L.map(p => [p.x, p.y + 2]), u => L[Math.min(L.length - 1, Math.round(u * (L.length - 1)))].w * .42));
+  const r = rngFor('farlift');
+  for (let k = 0; k < 6; k++) {     // streaks within it
+    const o = (r() - .5) * .7, a = Math.floor(r() * L.length * .5), b = Math.min(L.length - 1, a + 8 + Math.floor(r() * L.length * .5));
+    const pts = L.slice(a, b).map(p => [p.x, p.y + 2 + o * p.w * .5]);
+    if (pts.length > 3) polys.push(taper(pts, u => 1.2 * Math.sin(Math.PI * u) + .4));
+  }
+  const bases = polys.map((P, i) => base(P, 'rfl' + i, { E: 6, vmin: .6, vmax: 1.8 })), bb = bbOf(bases.map(b => b.P), 30);
+  const m = blur(stack(bases, bb, { key: 'rib-far', layers: 16, alpha: .07, depth: 3, amt: .3 }), bb.w, bb.h, 2);
+  for (let y = 0; y < bb.h; y++) for (let x = 0; x < bb.w; x++) {
+    const i = y * bb.w + x, gi = (bb.y0 + y) * W + bb.x0 + x;
+    m[i] = Math.min(1, m[i]) * (1 - .9 * RIB.behind[gi]) * (1 - .8 * CR[gi]) * smooth(HOR + 4, HOR - 6, bb.y0 + y);
+  }
+  lift(m, bb, .36);
+}
+
+function toothShade() {
+  const img = G2.getImageData(0, 0, W, H), p = img.data;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x, s = HM[i - W - 1] - HM[i + W + 1], v = 1 + s * .028 - (.5 - HM[i]) * .014, j = i * 4;
+    p[j] *= v; p[j + 1] *= v; p[j + 2] *= v;
+  }
+  G2.putImageData(img, 0, 0);
+}
+/*@@PAINT2@@*/
+
+function draw(g) {
+  G2 = g;
+  let t = performance.now();
+  const tick = k => { const n = performance.now(); T[k] = Math.round(n - t); t = n; };
+  NF1 = field('nf1', 260, 3, 8); NF2 = field('nf2', 70, 3, 4); NF3 = field('nf3', 18, 2, 2); tick('fields');
+  HM = buildPaper(); HMS = blur(HM, W, H, 1, 1); tick('paper');
+  g.fillStyle = css(PAPER); g.fillRect(0, 0, W, H);
+  buildClouds(); buildBlooms(); buildRibbon(); buildSnow(); tick('masks');
+  paintSky(); tick('sky');
+  paintAndes(); tick('andes');
+  paintClouds(); tick('clouds');
+  paintRibbon(); liftRibbonFar(); tick('ribbon');
+  buildGround(); tick('ground');
+  paintFarBand(); paintCanopyBase(); tick('canopybase');
+  paintTrees(); tick('treesMs');
+  paintSlices(); tick('rows');
+  paintGaps(); paintWall(); tick('gaps');
+  paintRiver(); tick('river');
+  paintCloudShadows(); tick('cloudshadow');
+  liftHaze();
+  liftWisps(); liftSparkle(); tick('wisps');
+  paintMacaws();
+  paintTitle(); tick('details');
+  /*@@CALLS@@*/
+  toothShade(); tick('tooth');
+  window.__T = T;
+}
+stillFrame(W, H, draw);
+
+</script>
+</body>
+</html>

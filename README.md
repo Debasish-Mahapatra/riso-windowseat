@@ -20,6 +20,19 @@ source instead, open any `index.html` in a browser and press play.
 | [Lumen](films/lumen/) | 28 s | A seed that contains a sun; the first short, in call-and-response form |
 | [Emergence](films/emergence/) | 28 s | Lumen's sibling: how machines learned to listen, as nine worlds |
 
+### Climate shorts
+
+These two 70-second films about climate change are 16:9 (1920 × 1080, 24 fps) and move beyond
+riso. Every sound in their scores is synthesised in the page.
+
+| Film | Length | |
+|---|---|---|
+| [Snowman](films/snowman/) | 70 s | Linocut in black and red: one slope over 31 winters, where the boy grows and the snowman shrinks; a music-box waltz |
+| [Rivers in the Sky](films/rivers-in-the-sky/) | 70 s | Watercolour: one drop of water crosses the Amazon, because the forest makes its own rain; pan flute and marimba |
+
+The four pitches they were chosen from, with a test frame each (linocut, Warli, knit and felt,
+watercolour), are in [`studies/climate-pitches/`](studies/climate-pitches/).
+
 ### Window Seat
 
 A night train journey seen through one fixed window with a glass of water on the sill. Every
@@ -78,10 +91,10 @@ breaks determinism.
 
 | Path | Contents |
 |---|---|
-| `films/` | The four films, each with its `FILM.md`; Window Seat and Roost include sample credits and bank rebuild scripts |
+| `films/` | The four riso films and the two climate shorts, each with its `FILM.md`; Window Seat and Roost include sample credits and bank rebuild scripts |
 | `prints/workings/` | A still print series and the print kit new works start from |
 | `docs/` | The craft: brief, visual development, drawing, scene space, motion, sound, quality bar |
-| `studies/` | Interactive A/B studies of each technique, and the sound kit |
+| `studies/` | Interactive A/B studies of each technique, the sound kit, and the climate pitches' style tests |
 | `tools/` | Scaffolding, verification, contact sheets, audio analysis and MP4 export ([README](tools/README.md)) |
 | `.claude/` | Skills, the ink-plate rule and the determinism hook |
 
